@@ -2,11 +2,11 @@ import SwiftUI
 
 enum ColorScale {
     private static let anchors: [(Double, NSColor)] = [
-        (0.0,  NSColor(hex: 0x4FC3F7)),
-        (0.25, NSColor(hex: 0x66BB6A)),
-        (0.5,  NSColor(hex: 0xFFEE58)),
-        (0.75, NSColor(hex: 0xFFA726)),
-        (1.0,  NSColor(hex: 0xEF5350)),
+        (0.0,  NSColor(hex: 0x4FC3F7).usingColorSpace(.sRGB)!),
+        (0.25, NSColor(hex: 0x66BB6A).usingColorSpace(.sRGB)!),
+        (0.5,  NSColor(hex: 0xFFEE58).usingColorSpace(.sRGB)!),
+        (0.75, NSColor(hex: 0xFFA726).usingColorSpace(.sRGB)!),
+        (1.0,  NSColor(hex: 0xEF5350).usingColorSpace(.sRGB)!),
     ]
 
     static func color(for usage: Double) -> Color {
@@ -26,6 +26,12 @@ enum ColorScale {
         let localT = range > 0 ? (t - lower.0) / range : 0
         return Color(nsColor: NSColor.lerp(lower.1, upper.1, CGFloat(localT)))
     }
+
+    static func color(forRSSI rssi: Int) -> Color {
+        let norm = Double(max(30, min(90, abs(rssi))) - 30) / 60.0
+        return color(for: norm)
+    }
+
 }
 
 extension NSColor {
@@ -37,12 +43,10 @@ extension NSColor {
     }
 
     static func lerp(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
-        let t = max(0, min(1, t))
-        guard let aRGB = a.usingColorSpace(.sRGB),
-              let bRGB = b.usingColorSpace(.sRGB) else { return a }
-        let r = aRGB.redComponent   + (bRGB.redComponent   - aRGB.redComponent)   * t
-        let g = aRGB.greenComponent + (bRGB.greenComponent - aRGB.greenComponent) * t
-        let bl = aRGB.blueComponent + (bRGB.blueComponent  - aRGB.blueComponent)  * t
+        let u = max(0, min(1, t))
+        let r = a.redComponent   + (b.redComponent   - a.redComponent)   * u
+        let g = a.greenComponent + (b.greenComponent - a.greenComponent) * u
+        let bl = a.blueComponent + (b.blueComponent  - a.blueComponent)  * u
         return NSColor(red: r, green: g, blue: bl, alpha: 1.0)
     }
 }

@@ -1,49 +1,44 @@
 # Semono
 
-A pixel-art performance HUD for macOS, rendered as a transparent floating overlay.
-
-<img width="312" alt="screenshot" src="https://github.com/user-attachments/assets/placeholder" />
-
-## Features
-
-- **Pixel HUD** — Departure Mono font at 11 pt for sharp rendering on Retina displays
-- **Three-in-one** — CPU usage, memory usage, and network throughput in a compact two-line layout
-- **Transparent overlay** — borderless floating window, click-through, stays on all Spaces
-- **Color-coded metrics** — blue → green → yellow → orange → red gradient
-- **Menu bar icon** — quick access to settings and quit
+Pixel-art performance HUD overlay for macOS.
 
 ## Layout
 
 ```
-CPU  0% | ↑   0B
-MEM  0% | ↓   0B
+CPU   0%  │ WiFi   -46
+MEM   0%  │ ↑       0B
+PWR  0.0  │ ↓       0B
 ```
 
-Each row shows a system metric paired with the corresponding network direction:
-- **CPU** → upload speed
-- **MEM** → download speed
+- **Left column** — CPU, memory, system power draw (watts)
+- **Right column** — connection type + RSSI, upload / download speed
+- Color-coded metrics: blue → green → yellow → orange → red
+
+## Features
+
+- Departure Mono pixel font at 11 pt — crisp on Retina
+- CPU / memory / power / network throughput — 1–5 s refresh
+- Wi‑Fi RSSI via CoreWLAN; Ethernet / offline detection
+- Transparent floating window, draggable, position remembered across restarts
+- Menu bar icon with Settings and Quit
+- Optional fullscreen overlay (restart to apply)
 
 ## Settings
 
 | Setting | Options | Default |
 |---------|---------|---------|
-| Refresh interval | 1s / 2s / 3s / 5s | 2s |
-| Background opacity | 0% – 100% | 72% |
+| Refresh interval | 1 / 2 / 3 / 5 s | 2 s |
+| Background opacity | 0 – 100 % | 72 % |
+| Show in fullscreen | on / off | on |
 | Launch at login | on / off | off |
 
 ## Build
 
-Requires macOS 15+ and Swift 6.
+macOS 15+, Swift 6.
 
 ```bash
-./build.sh          # build + bundle .app
+./build.sh
 open .build/Semono.app
-```
-
-Or with SwiftPM directly:
-
-```bash
-swift build -c release
 ```
 
 ## License

@@ -14,6 +14,10 @@ let package = Package(
             name: "Semono",
             resources: [
                 .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreWLAN")
             ]
         )
     ]

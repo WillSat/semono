@@ -1,12 +1,18 @@
 import Foundation
 import Darwin
+import IOKit
+import SystemConfiguration
+import CoreWLAN
 
 @MainActor
 final class MetricsCollector: ObservableObject {
     @Published var cpuUsage: Double = 0
     @Published var memoryUsage: Double = 0
+    @Published var powerUsage: Double = 0
     @Published var downloadSpeed: Double = 0
     @Published var uploadSpeed: Double = 0
+    @Published var networkType: String = ""
+    @Published var wifiRSSI: Int = 0
 
     private var prevCpuUsed: UInt64 = 0
     private var prevCpuTotal: UInt64 = 0
@@ -34,9 +40,15 @@ final class MetricsCollector: ObservableObject {
     private func sample() {
         cpuUsage = readCPU()
         memoryUsage = readMemory()
+        powerUsage = Self.readPower()
+
         let (down, up) = readNetwork()
         downloadSpeed = down
         uploadSpeed = up
+
+        let (connType, rssi) = Self.readConnectionInfo()
+        networkType = connType
+        wifiRSSI = rssi
     }
 
     // MARK: - CPU
@@ -53,7 +65,7 @@ final class MetricsCollector: ObservableObject {
             &cpuInfo,
             &numCpuInfo
         )
-        guard result == KERN_SUCCESS else { return 0 }
+        guard result == KERN_SUCCESS, cpuInfo != nil else { return 0 }
 
         let cpuCount = Int(numCPUs)
         var user: UInt32 = 0
@@ -92,6 +104,20 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Memory
 
+    private static let pageSize = Double(sysconf(Int32(_SC_PAGESIZE)))
+    private static let totalMemory: Double = {
+        var info = host_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<host_basic_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                _ = host_info(mach_host_self(), HOST_BASIC_INFO, $0, &count)
+            }
+        }
+        return Double(info.max_mem)
+    }()
+
     private func readMemory() -> Double {
         var info = vm_statistics64()
         var count = mach_msg_type_number_t(
@@ -104,32 +130,43 @@ final class MetricsCollector: ObservableObject {
         }
         guard result == KERN_SUCCESS else { return 0 }
 
-        let pageSize = Double(sysconf(Int32(_SC_PAGESIZE)))
-        let active     = Double(info.active_count) * pageSize
-        let wired      = Double(info.wire_count) * pageSize
-        let compressed = Double(info.compressor_page_count) * pageSize
+        let active     = Double(info.active_count) * Self.pageSize
+        let wired      = Double(info.wire_count) * Self.pageSize
+        let compressed = Double(info.compressor_page_count) * Self.pageSize
         let used = active + wired + compressed
 
-        var hostInfo = host_basic_info()
-        var hostCount = mach_msg_type_number_t(
-            MemoryLayout<host_basic_info_data_t>.size / MemoryLayout<integer_t>.size
-        )
-        let hostResult = withUnsafeMutablePointer(to: &hostInfo) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(hostCount)) {
-                host_info(mach_host_self(), HOST_BASIC_INFO, $0, &hostCount)
-            }
-        }
-        guard hostResult == KERN_SUCCESS else { return 0 }
-        let total = Double(hostInfo.max_mem)
-
-        guard total > 0 else { return 0 }
-        return min(1.0, used / total)
+        guard Self.totalMemory > 0 else { return 0 }
+        return min(1.0, used / Self.totalMemory)
     }
 
-    // MARK: - Network
+    // MARK: - Power
+
+    nonisolated private static func readPower() -> Double {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(0, IOServiceMatching("AppleSmartBattery"), &iterator) == KERN_SUCCESS
+        else { return 0 }
+        defer { IOObjectRelease(iterator) }
+
+        let service = IOIteratorNext(iterator)
+        guard service != 0 else { return 0 }
+        defer { IOObjectRelease(service) }
+
+        var props: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let dict = props?.takeRetainedValue() as? [String: Any]
+        else { return 0 }
+
+        if let telemetry = dict["PowerTelemetryData"] as? [String: Any],
+           let systemPower = telemetry["SystemPowerIn"] as? Int {
+            return Double(systemPower) / 1000.0
+        }
+        return 0
+    }
+
+    // MARK: - Network Bytes
 
     private func readNetwork() -> (Double, Double) {
-        guard let (tx, rx) = Self.readNetworkBytes(interface: "en0") else {
+        guard let (tx, rx) = Self.readNetworkBytes() else {
             return (0, 0)
         }
         let now = Date()
@@ -154,13 +191,30 @@ final class MetricsCollector: ObservableObject {
         return (down, up)
     }
 
-    private static let kCPUStateMax    = Int32(4)
-    private static let kCPUStateUser   = Int32(0)
-    private static let kCPUStateSystem = Int32(1)
-    private static let kCPUStateIdle   = Int32(2)
-    private static let kCPUStateNice   = Int32(3)
+    // MARK: - Connection type + RSSI
 
-    nonisolated private static func readNetworkBytes(interface: String) -> (tx: UInt64, rx: UInt64)? {
+    nonisolated private static func readConnectionInfo() -> (type: String, rssi: Int) {
+        guard let store = SCDynamicStoreCreate(nil, "Semono" as CFString, nil, nil) else {
+            return ("---", 0)
+        }
+        guard let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
+              let primaryID = global["PrimaryService"] as? String,
+              let svc = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(primaryID)/Interface" as CFString) as? [String: Any],
+              let hardware = svc["Hardware"] as? String
+        else {
+            return ("---", 0)
+        }
+
+        if hardware == "AirPort" {
+            let rssi = CWWiFiClient.shared().interface()?.rssiValue() ?? 0
+            return ("WiFi", rssi)
+        }
+        return ("Eth", 0)
+    }
+
+    // MARK: - Shared helpers
+
+    nonisolated private static func readNetworkBytes() -> (tx: UInt64, rx: UInt64)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(first) }
@@ -170,7 +224,7 @@ final class MetricsCollector: ObservableObject {
             defer { ptr = ptr?.pointee.ifa_next }
             guard let ifa = ptr else { continue }
             let name = String(cString: ifa.pointee.ifa_name)
-            guard name == interface else { continue }
+            guard name == "en0" else { continue }
             guard let sa = ifa.pointee.ifa_addr,
                   sa.pointee.sa_family == UInt8(AF_LINK) else { continue }
             let data = ifa.pointee.ifa_data.assumingMemoryBound(to: if_data.self).pointee
@@ -178,6 +232,12 @@ final class MetricsCollector: ObservableObject {
         }
         return nil
     }
+
+    private static let kCPUStateMax    = Int32(4)
+    private static let kCPUStateUser   = Int32(0)
+    private static let kCPUStateSystem = Int32(1)
+    private static let kCPUStateIdle   = Int32(2)
+    private static let kCPUStateNice   = Int32(3)
 }
 
 private typealias processor_info_array_t = UnsafeMutablePointer<integer_t>

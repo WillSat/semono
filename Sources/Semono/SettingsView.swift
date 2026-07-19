@@ -3,6 +3,7 @@ import ServiceManagement
 
 struct SettingsView: View {
     @ObservedObject var settings = SettingsStore.shared
+    let restartAction: () -> Void
 
     var body: some View {
         Form {
@@ -13,6 +14,8 @@ struct SettingsView: View {
                     Slider(value: $settings.backgroundOpacity, in: 0.0...1.0)
                 }
                 .padding(.vertical, 2)
+
+                Toggle("Show in Fullscreen", isOn: $settings.showInFullscreen)
             } header: {
                 Text("Display")
             }
@@ -29,6 +32,14 @@ struct SettingsView: View {
                 Toggle("Launch at Login", isOn: loginBinding)
             } header: {
                 Text("Behavior")
+            }
+
+            Section {
+                Button("Apply") {
+                    restartAction()
+                }
+                .frame(maxWidth: .infinity)
+                .keyboardShortcut(.return)
             }
         }
         .formStyle(.grouped)

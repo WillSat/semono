@@ -3,7 +3,7 @@ import SwiftUI
 import ServiceManagement
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var window: NSWindow?
     private var hudWindowDelegate: WindowDelegate?
@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var settingsWindowDelegate: WindowDelegate?
     private var statusItem: NSStatusItem?
     private let metrics = MetricsCollector()
+    private var saveFrameTimer: Timer?
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         registerFont()
@@ -41,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     // MARK: - Window
 
-    @MainActor private func showHUD() {
+    private func showHUD() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let frame = hudFrame(for: screen)
 
@@ -55,7 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         w.backgroundColor = .clear
         w.hasShadow = false
         w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
-        w.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenNone]
+        w.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
+        if SettingsStore.shared.showInFullscreen {
+            w.collectionBehavior.insert(.fullScreenAuxiliary)
+        } else {
+            w.collectionBehavior.insert(.fullScreenNone)
+        }
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
@@ -64,8 +70,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         w.contentView = hosting
 
         let delegate = WindowDelegate(
-            onMove: { [weak self, weak w] in self?.saveFrame(w) },
-            onResize: { [weak self, weak w] in self?.saveFrame(w) }
+            onMove: { [weak self, weak w] in self?.scheduleSaveFrame(w) },
+            onResize: { [weak self, weak w] in self?.scheduleSaveFrame(w) }
         )
         hudWindowDelegate = delegate
         w.delegate = delegate
@@ -74,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         window = w
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak w] in
-            self?.saveFrame(w)
+            self?.scheduleSaveFrame(w)
         }
     }
 
@@ -83,6 +89,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         guard let screen else { return }
         let frame = hudFrame(for: screen)
         window?.setFrame(frame, display: true, animate: false)
+    }
+
+    private func scheduleSaveFrame(_ w: NSWindow?) {
+        saveFrameTimer?.invalidate()
+        saveFrameTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self, weak w] _ in
+            guard let self, let w else { return }
+            Task { @MainActor in self.saveFrame(w) }
+        }
     }
 
     private func saveFrame(_ w: NSWindow?) {
@@ -147,14 +161,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 320),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 350),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         w.title = "Semono Settings"
         w.isReleasedWhenClosed = false
-        w.contentView = NSHostingView(rootView: SettingsView())
+        w.contentView = NSHostingView(rootView: SettingsView(restartAction: { [weak self] in
+            self?.restartApp()
+        }))
         w.center()
         w.makeKeyAndOrderFront(nil)
         settingsWindow = w
@@ -168,6 +184,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     @objc private func quitApp() {
+        NSApplication.shared.terminate(nil)
+    }
+
+    private func restartApp() {
+        let appURL = Bundle.main.bundleURL
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 0.3; open '\(appURL.path)'"]
+        try? task.run()
         NSApplication.shared.terminate(nil)
     }
 
