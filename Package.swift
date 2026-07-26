@@ -16,8 +16,14 @@ let package = Package(
                 .process("Resources")
             ],
             linkerSettings: [
-                .linkedFramework("IOKit"),
                 .linkedFramework("CoreWLAN")
+            ]
+        ),
+        .executableTarget(
+            name: "power_helper",
+            path: "Helpers",
+            linkerSettings: [
+                .linkedFramework("IOKit")
             ]
         )
     ]

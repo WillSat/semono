@@ -16,6 +16,18 @@ struct SettingsView: View {
                 .padding(.vertical, 2)
 
                 Toggle("Show in Fullscreen", isOn: $settings.showInFullscreen)
+
+                Picker("Font:", selection: $settings.fontName) {
+                    ForEach(SettingsStore.availableFonts, id: \.name) { f in
+                        Text(f.label).tag(f.name)
+                    }
+                }
+
+                Picker("Status Bar:", selection: $settings.statusBarMetric) {
+                    Text("CPU").tag("cpu")
+                    Text("Memory").tag("memory")
+                }
+                .pickerStyle(.segmented)
             } header: {
                 Text("Display")
             }

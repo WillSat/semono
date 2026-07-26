@@ -1,6 +1,5 @@
 import Foundation
 import Darwin
-import IOKit
 import SystemConfiguration
 import CoreWLAN
 
@@ -21,6 +20,8 @@ final class MetricsCollector: ObservableObject {
     private var prevNetTime: Date = .now
     private var hasPrevNet: Bool = false
     private var updateTask: Task<Void, Never>?
+    private var sampleCount: Int = 0
+    private var cachedPower: Double = 0
 
     func start() {
         updateTask = Task { @MainActor [weak self] in
@@ -40,7 +41,12 @@ final class MetricsCollector: ObservableObject {
     private func sample() {
         cpuUsage = readCPU()
         memoryUsage = readMemory()
-        powerUsage = Self.readPower()
+
+        if sampleCount % 2 == 0 {
+            cachedPower = Self.readPower()
+        }
+        powerUsage = cachedPower
+        sampleCount &+= 1
 
         let (down, up) = readNetwork()
         downloadSpeed = down
@@ -142,25 +148,17 @@ final class MetricsCollector: ObservableObject {
     // MARK: - Power
 
     nonisolated private static func readPower() -> Double {
-        var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(0, IOServiceMatching("AppleSmartBattery"), &iterator) == KERN_SUCCESS
-        else { return 0 }
-        defer { IOObjectRelease(iterator) }
-
-        let service = IOIteratorNext(iterator)
-        guard service != 0 else { return 0 }
-        defer { IOObjectRelease(service) }
-
-        var props: Unmanaged<CFMutableDictionary>?
-        guard IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
-              let dict = props?.takeRetainedValue() as? [String: Any]
-        else { return 0 }
-
-        if let telemetry = dict["PowerTelemetryData"] as? [String: Any],
-           let systemPower = telemetry["SystemPowerIn"] as? Int {
-            return Double(systemPower) / 1000.0
-        }
-        return 0
+        let helperURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/power_helper")
+        let task = Process()
+        task.executableURL = helperURL
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        guard let _ = try? task.run() else { return 0 }
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        return (Double(raw) ?? 0) / 1000.0
     }
 
     // MARK: - Network Bytes

@@ -18,6 +18,29 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
 cp "$BIN_PATH" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 
+# Copy power helper
+HELPER_PATH="${BIN_DIR}/power_helper"
+if [ -f "$HELPER_PATH" ]; then
+    cp "$HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/power_helper"
+fi
+
+# Generate app icon from icon.png
+if [ -f "icon.png" ]; then
+    ICONSET="$(mktemp -d)/icon.iconset"
+    mkdir -p "$ICONSET"
+    sips -z 16 16   icon.png --out "$ICONSET/icon_16x16.png" >/dev/null
+    sips -z 32 32   icon.png --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+    sips -z 32 32   icon.png --out "$ICONSET/icon_32x32.png" >/dev/null
+    sips -z 64 64   icon.png --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+    sips -z 128 128 icon.png --out "$ICONSET/icon_128x128.png" >/dev/null
+    sips -z 256 256 icon.png --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+    sips -z 256 256 icon.png --out "$ICONSET/icon_256x256.png" >/dev/null
+    sips -z 512 512 icon.png --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+    sips -z 512 512 icon.png --out "$ICONSET/icon_512x512.png" >/dev/null
+    iconutil -c icns "$ICONSET" -o "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns" 2>/dev/null
+    rm -rf "$(dirname "$ICONSET")"
+fi
+
 # Copy font to app bundle Resources
 if [ -f "Sources/${APP_NAME}/Resources/DepartureMono-Regular.otf" ]; then
     cp "Sources/${APP_NAME}/Resources/DepartureMono-Regular.otf" "${BUNDLE_DIR}/Contents/Resources/"
@@ -37,11 +60,13 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1</string>
+    <string>1.2</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
 PLIST

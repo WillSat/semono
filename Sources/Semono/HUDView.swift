@@ -1,7 +1,5 @@
 import SwiftUI
 
-private let fontName = "DepartureMono-Regular"
-
 struct HUDView: View {
     @ObservedObject var metrics: MetricsCollector
     @ObservedObject var settings = SettingsStore.shared
@@ -10,11 +8,11 @@ struct HUDView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 MetricRow(label: "CPU", value: fmtPct(metrics.cpuUsage),
-                          color: ColorScale.color(for: metrics.cpuUsage))
+                          color: ColorScale.color(for: metrics.cpuUsage), font: currentFont)
                 MetricRow(label: "MEM", value: fmtPct(metrics.memoryUsage),
-                          color: ColorScale.color(for: metrics.memoryUsage))
+                          color: ColorScale.color(for: metrics.memoryUsage), font: currentFont)
                 MetricRow(label: "PWR", value: fmtPwr(metrics.powerUsage),
-                          color: .white.opacity(0.85))
+                          color: .white.opacity(0.85), font: currentFont)
             }
 
             divider
@@ -32,14 +30,14 @@ struct HUDView: View {
                 .fill(Color.black.opacity(settings.backgroundOpacity))
                 .overlay(
                     RoundedRectangle(cornerRadius: 1)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        .stroke(Color.clear, lineWidth: 1)
                 )
         )
         .fixedSize()
     }
 
     private var divider: some View {
-        Color.white.opacity(0.1)
+        Color.clear
             .frame(width: 1)
             .padding(.vertical, 2)
             .padding(.horizontal, 3)
@@ -50,19 +48,21 @@ struct HUDView: View {
         if metrics.networkType == "WiFi" {
             HStack(spacing: 1) {
                 Text(metrics.networkType)
-                    .font(.custom(fontName, size: 8))
+                    .font(.custom(currentFont, size: 8))
                     .foregroundColor(.white.opacity(0.4))
                 Text(String(format: "%3d", metrics.wifiRSSI))
-                    .font(.custom(fontName, size: 11))
+                    .font(.custom(currentFont, size: 11))
                     .foregroundColor(ColorScale.color(forRSSI: metrics.wifiRSSI))
                     .monospacedDigit()
             }
         } else {
             Text(metrics.networkType)
-                .font(.custom(fontName, size: 11))
+                .font(.custom(currentFont, size: 11))
                 .foregroundColor(.white.opacity(0.7))
         }
     }
+
+    private var currentFont: String { settings.fontName }
 
     private func fmtPct(_ v: Double) -> String { String(format: "%3d%%", Int(v * 100)) }
     private func fmtPwr(_ w: Double) -> String { String(format: "%4.1f", w) }
@@ -90,10 +90,10 @@ struct HUDView: View {
     private func speedRow(arrow: String, speed: Double) -> some View {
         HStack(spacing: 1) {
             Text(arrow)
-                .font(.custom(fontName, size: 11))
+                .font(.custom(currentFont, size: 11))
                 .foregroundColor(Color(red: 0.70, green: 0.55, blue: 0.92))
             Text(fmtSpeed(speed))
-                .font(.custom(fontName, size: 11))
+                .font(.custom(currentFont, size: 11))
                 .foregroundColor(.white.opacity(0.85))
                 .monospacedDigit()
         }
@@ -106,14 +106,15 @@ private struct MetricRow: View {
     let label: String
     let value: String
     let color: Color
+    let font: String
 
     var body: some View {
         HStack(spacing: 1) {
             Text(label)
-                .font(.custom(fontName, size: 8))
+                .font(.custom(font, size: 8))
                 .foregroundColor(.white.opacity(0.4))
             Text(value)
-                .font(.custom(fontName, size: 11))
+                .font(.custom(font, size: 11))
                 .foregroundColor(color)
                 .monospacedDigit()
         }

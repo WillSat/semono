@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ServiceManagement
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,8 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var settingsWindowDelegate: WindowDelegate?
     private var statusItem: NSStatusItem?
+    private var menubarView: MenubarContentView?
     private let metrics = MetricsCollector()
     private var saveFrameTimer: Timer?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         registerFont()
@@ -19,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showHUD()
         metrics.start()
         syncLoginItemState()
+        observeMetrics()
 
         NotificationCenter.default.addObserver(
             self,
@@ -38,6 +42,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func syncLoginItemState() {
         SettingsStore.shared.launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    private func observeMetrics() {
+        Publishers.Merge(
+            metrics.$cpuUsage.map { _ in },
+            metrics.$memoryUsage.map { _ in }
+        )
+        .merge(with: SettingsStore.shared.objectWillChange)
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in self?.updateStatusBarTitle() }
+        .store(in: &cancellables)
     }
 
     // MARK: - Window
@@ -123,15 +138,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        guard let button = statusItem?.button else { return }
-        button.image = NSImage(
-            systemSymbolName: "gauge.with.dots.needle.33percent",
-            accessibilityDescription: "Semono"
-        )
-        button.image?.isTemplate = true
+
+        let view = MenubarContentView()
 
         let menu = NSMenu()
-
         let settingsItem = NSMenuItem(
             title: "Settings...",
             action: #selector(openSettings),
@@ -149,11 +159,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         quitItem.target = self
         menu.addItem(quitItem)
+        view.menu = menu
 
-        statusItem?.menu = menu
+        statusItem?.view = view
+        menubarView = view
+    }
+
+    private func updateStatusBarTitle() {
+        let metric = SettingsStore.shared.statusBarMetric
+        let value: Double
+        let type: String
+        switch metric {
+        case "memory":
+            value = metrics.memoryUsage
+            type = "MEM"
+        default:
+            value = metrics.cpuUsage
+            type = "CPU"
+        }
+        menubarView?.displayValue = Int(value * 100)
+        menubarView?.displayType = type
     }
 
     @objc private func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
         syncLoginItemState()
         if let existing = settingsWindow {
             existing.makeKeyAndOrderFront(nil)
@@ -167,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         w.title = "Semono Settings"
+        w.level = .floating
         w.isReleasedWhenClosed = false
         w.contentView = NSHostingView(rootView: SettingsView(restartAction: { [weak self] in
             self?.restartApp()
