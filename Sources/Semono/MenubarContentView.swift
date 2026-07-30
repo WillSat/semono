@@ -4,7 +4,7 @@ final class MenubarContentView: NSView {
     let valueLabel = NSTextField(labelWithString: "")
     let typeLabel  = NSTextField(labelWithString: "")
 
-    var displayValue: Int = 0 { didSet { valueLabel.stringValue = "\(displayValue)%" } }
+    var displayText: String = "" { didSet { valueLabel.stringValue = displayText } }
     var displayType: String = "CPU" { didSet { typeLabel.stringValue = displayType } }
 
     override init(frame: NSRect) {

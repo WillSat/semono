@@ -15,7 +15,12 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 2)
 
-                Toggle("Show in Fullscreen", isOn: $settings.showInFullscreen)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Font Scale: \(Int(settings.fontScale))")
+                        .font(.caption)
+                    Slider(value: $settings.fontScale, in: -5...10, step: 1)
+                }
+                .padding(.vertical, 2)
 
                 Picker("Font:", selection: $settings.fontName) {
                     ForEach(SettingsStore.availableFonts, id: \.name) { f in
@@ -23,13 +28,31 @@ struct SettingsView: View {
                     }
                 }
 
-                Picker("Status Bar:", selection: $settings.statusBarMetric) {
+                Toggle("Show in Fullscreen", isOn: $settings.showInFullscreen)
+                Toggle("Block Display", isOn: $settings.useBlockDisplay)
+            } header: {
+                Text("Display")
+            }
+
+            Section {
+                Toggle("Compute (CPU/GPU/PWR)", isOn: $settings.showComputeColumn)
+                Toggle("Memory (MEM/PRS/SWAP)", isOn: $settings.showMemoryColumn)
+                Toggle("Storage (DR/DW/THM)",  isOn: $settings.showStorageColumn)
+                Toggle("Network (NET/UP/DN)",   isOn: $settings.showNetworkColumn)
+            } header: {
+                Text("Columns")
+            }
+
+            Section {
+                Picker("Menu Bar:", selection: $settings.statusBarMetric) {
                     Text("CPU").tag("cpu")
-                    Text("Memory").tag("memory")
+                    Text("GPU").tag("gpu")
+                    Text("PWR").tag("pwr")
+                    Text("MEM").tag("memory")
                 }
                 .pickerStyle(.segmented)
             } header: {
-                Text("Display")
+                Text("Menu Bar")
             }
 
             Section {
@@ -43,7 +66,7 @@ struct SettingsView: View {
 
                 Toggle("Launch at Login", isOn: loginBinding)
             } header: {
-                Text("Behavior")
+                Text("General")
             }
 
             Section {

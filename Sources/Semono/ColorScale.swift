@@ -27,6 +27,17 @@ enum ColorScale {
         return Color(nsColor: NSColor.lerp(lower.1, upper.1, CGFloat(localT)))
     }
 
+    static func color(forLevel level: Int) -> Color {
+        let t: Double
+        switch level {
+        case 0: t = 0.0
+        case 1: t = 0.33
+        case 2: t = 0.66
+        default: t = 1.0
+        }
+        return color(for: t)
+    }
+
     static func color(forRSSI rssi: Int) -> Color {
         let norm = Double(max(30, min(90, abs(rssi))) - 30) / 60.0
         return color(for: norm)

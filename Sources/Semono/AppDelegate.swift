@@ -46,9 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func observeMetrics() {
         Publishers.Merge(
-            metrics.$cpuUsage.map { _ in },
-            metrics.$memoryUsage.map { _ in }
+            metrics.$gpuUsage.map { _ in },
+            metrics.$cpuUsage.map { _ in }
         )
+        .merge(with: metrics.$memoryUsage.map { _ in })
+        .merge(with: metrics.$powerUsage.map { _ in })
         .merge(with: SettingsStore.shared.objectWillChange)
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.updateStatusBarTitle() }
@@ -167,17 +169,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusBarTitle() {
         let metric = SettingsStore.shared.statusBarMetric
-        let value: Double
+        let text: String
         let type: String
         switch metric {
         case "memory":
-            value = metrics.memoryUsage
+            text = "\(Int(metrics.memoryUsage * 100))%"
             type = "MEM"
+        case "gpu":
+            text = "\(Int(metrics.gpuUsage * 100))%"
+            type = "GPU"
+        case "pwr":
+            text = String(format: "%.1f", metrics.powerUsage)
+            type = "PWR"
         default:
-            value = metrics.cpuUsage
+            text = "\(Int(metrics.cpuUsage * 100))%"
             type = "CPU"
         }
-        menubarView?.displayValue = Int(value * 100)
+        menubarView?.displayText = text
         menubarView?.displayType = type
     }
 
@@ -190,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 350),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 420),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false

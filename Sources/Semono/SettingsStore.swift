@@ -13,7 +13,13 @@ final class SettingsStore: ObservableObject {
     @AppStorage("hudHeight") var hudHeight: Double = -1
     @AppStorage("showInFullscreen") var showInFullscreen = true
     @AppStorage("fontName") var fontName = "DepartureMono-Regular"
+    @AppStorage("fontScale") var fontScale: Double = 0
     @AppStorage("statusBarMetric") var statusBarMetric = "cpu"
+    @AppStorage("showComputeColumn") var showComputeColumn = true
+    @AppStorage("showMemoryColumn") var showMemoryColumn = true
+    @AppStorage("showStorageColumn") var showStorageColumn = true
+    @AppStorage("showNetworkColumn") var showNetworkColumn = true
+    @AppStorage("useBlockDisplay") var useBlockDisplay = false
 
     static let availableFonts: [(name: String, label: String)] = {
         var fonts: [(String, String)] = [("DepartureMono-Regular", "Departure Mono")]
@@ -24,7 +30,7 @@ final class SettingsStore: ObservableObject {
                 guard let psName = m[0] as? String,
                       let font = NSFont(name: psName, size: 11),
                       font.isFixedPitch,
-                      m[2] as? Int == 5  // regular weight only
+                      m[2] as? Int == 5
                 else { continue }
                 fonts.append((psName, family))
                 break

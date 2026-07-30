@@ -6,21 +6,57 @@ struct HUDView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                MetricRow(label: "CPU", value: fmtPct(metrics.cpuUsage),
-                          color: ColorScale.color(for: metrics.cpuUsage), font: currentFont)
-                MetricRow(label: "MEM", value: fmtPct(metrics.memoryUsage),
-                          color: ColorScale.color(for: metrics.memoryUsage), font: currentFont)
-                MetricRow(label: "PWR", value: fmtPwr(metrics.powerUsage),
-                          color: .white.opacity(0.85), font: currentFont)
+            if settings.showComputeColumn {
+                VStack(spacing: 0) {
+                    valCell(label: "CPU", usage: metrics.cpuUsage,
+                            color: ColorScale.color(for: metrics.cpuUsage))
+                    valCell(label: "GPU", usage: metrics.gpuUsage,
+                            color: ColorScale.color(for: metrics.gpuUsage))
+                    MetricCell(label: "PWR", value: fmtPwr(metrics.powerUsage),
+                               color: .white.opacity(0.85))
+                }
             }
 
-            divider
+            if settings.showComputeColumn && (settings.showMemoryColumn || settings.showStorageColumn || settings.showNetworkColumn) {
+                divider
+            }
 
-            VStack(spacing: 0) {
-                connRow
-                speedRow(arrow: "↑", speed: metrics.uploadSpeed)
-                speedRow(arrow: "↓", speed: metrics.downloadSpeed)
+            if settings.showMemoryColumn {
+                VStack(spacing: 0) {
+                    valCell(label: "MEM", usage: metrics.memoryUsage,
+                            color: ColorScale.color(for: metrics.memoryUsage))
+                    BarCell(label: "PRS", ratio: levelRatio(metrics.memoryPressureLevel),
+                            color: ColorScale.color(forLevel: metrics.memoryPressureLevel))
+                    MetricCell(label: "SWAP", value: fmtSwap(metrics.swapBytes),
+                               color: ColorScale.color(for: metrics.swapRatio))
+                }
+            }
+
+            if settings.showMemoryColumn && (settings.showStorageColumn || settings.showNetworkColumn) {
+                divider
+            }
+
+            if settings.showStorageColumn {
+                VStack(spacing: 0) {
+                    MetricCell(label: "DR", value: fmtSpeed(metrics.diskReadSpeed),
+                               color: .white.opacity(0.85))
+                    MetricCell(label: "DW", value: fmtSpeed(metrics.diskWriteSpeed),
+                               color: .white.opacity(0.85))
+                    BarCell(label: "THM", ratio: levelRatio(metrics.thermalState),
+                            color: ColorScale.color(forLevel: metrics.thermalState))
+                }
+            }
+
+            if settings.showStorageColumn && settings.showNetworkColumn {
+                divider
+            }
+
+            if settings.showNetworkColumn {
+                VStack(spacing: 0) {
+                    connCell
+                    speedCell(arrow: "\u{2191}", speed: metrics.uploadSpeed)
+                    speedCell(arrow: "\u{2193}", speed: metrics.downloadSpeed)
+                }
             }
         }
         .padding(.horizontal, 3)
@@ -28,44 +64,129 @@ struct HUDView: View {
         .background(
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color.black.opacity(settings.backgroundOpacity))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 1)
-                        .stroke(Color.clear, lineWidth: 1)
-                )
         )
         .fixedSize()
     }
 
+    // MARK: - Dimensions
+
+    private var currentFont: String { settings.fontName }
+    private var scale: CGFloat { CGFloat(1.0 + settings.fontScale / 10.0) }
+    private var labelFontSz: CGFloat { 8 * scale }
+    private var valueFontSz: CGFloat { 11 * scale }
+    private var barW: CGFloat { valueFontSz * 3.0 }
+    private var barH: CGFloat { valueFontSz * 0.85 }
+    private var minSpacer: CGFloat { 4 * scale }
+
+    // MARK: - Cells
+
+    @ViewBuilder
+    private func valCell(label: String, usage: Double, color: Color) -> some View {
+        if settings.useBlockDisplay {
+            BarCell(label: label, ratio: usage, color: color)
+        } else {
+            MetricCell(label: label, value: fmtPct(usage), color: color)
+        }
+    }
+
+    private func MetricCell(label: String, value: String, color: Color) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .font(.custom(currentFont, size: labelFontSz))
+                .foregroundColor(.white.opacity(0.4))
+            Spacer(minLength: minSpacer)
+            Text(value)
+                .font(.custom(currentFont, size: valueFontSz))
+                .foregroundColor(color)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .frame(height: valueFontSz * 1.15)
+    }
+
+    private func BarCell(label: String, ratio: Double, color: Color) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .font(.custom(currentFont, size: labelFontSz))
+                .foregroundColor(.white.opacity(0.4))
+            Spacer(minLength: minSpacer)
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.gray.opacity(0.35))
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(color)
+                    .frame(width: max(3, (barW - 2) * CGFloat(max(0, min(1, ratio)))))
+                    .padding(1)
+            }
+            .frame(width: barW, height: barH)
+            .overlay(
+                RoundedRectangle(cornerRadius: 1)
+                    .stroke(Color.white.opacity(0.5), lineWidth: 0.5)
+            )
+        }
+        .frame(height: valueFontSz * 1.15)
+    }
+
+    @ViewBuilder
+    private var connCell: some View {
+        if metrics.networkType == "WiFi" {
+            HStack(spacing: 0) {
+                Text(metrics.networkType)
+                    .font(.custom(currentFont, size: labelFontSz))
+                    .foregroundColor(.white.opacity(0.4))
+                Spacer(minLength: minSpacer)
+                Text(String(format: "%3d", metrics.wifiRSSI))
+                    .font(.custom(currentFont, size: valueFontSz))
+                    .foregroundColor(ColorScale.color(forRSSI: metrics.wifiRSSI))
+                    .monospacedDigit()
+            }
+            .frame(height: valueFontSz * 1.15)
+        } else {
+            Text(metrics.networkType)
+                .font(.custom(currentFont, size: valueFontSz))
+                .foregroundColor(.white.opacity(0.7))
+                .frame(height: valueFontSz * 1.15)
+        }
+    }
+
+    private func speedCell(arrow: String, speed: Double) -> some View {
+        HStack(spacing: 0) {
+            Text(arrow)
+                .font(.custom(currentFont, size: valueFontSz))
+                .foregroundColor(Color(red: 0.70, green: 0.55, blue: 0.92))
+            Spacer(minLength: minSpacer)
+            Text(fmtSpeed(speed))
+                .font(.custom(currentFont, size: valueFontSz))
+                .foregroundColor(.white.opacity(0.85))
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .frame(height: valueFontSz * 1.15)
+    }
+
+    // MARK: - Helpers
+
     private var divider: some View {
-        Color.clear
+        Rectangle()
+            .fill(Color.white.opacity(0.12))
             .frame(width: 1)
             .padding(.vertical, 2)
             .padding(.horizontal, 3)
     }
 
-    @ViewBuilder
-    private var connRow: some View {
-        if metrics.networkType == "WiFi" {
-            HStack(spacing: 1) {
-                Text(metrics.networkType)
-                    .font(.custom(currentFont, size: 8))
-                    .foregroundColor(.white.opacity(0.4))
-                Text(String(format: "%3d", metrics.wifiRSSI))
-                    .font(.custom(currentFont, size: 11))
-                    .foregroundColor(ColorScale.color(forRSSI: metrics.wifiRSSI))
-                    .monospacedDigit()
-            }
-        } else {
-            Text(metrics.networkType)
-                .font(.custom(currentFont, size: 11))
-                .foregroundColor(.white.opacity(0.7))
-        }
-    }
-
-    private var currentFont: String { settings.fontName }
-
     private func fmtPct(_ v: Double) -> String { String(format: "%3d%%", Int(v * 100)) }
     private func fmtPwr(_ w: Double) -> String { String(format: "%4.1f", w) }
+    private func levelRatio(_ level: Int) -> Double { Double(level + 1) / 4.0 }
+
+    private func fmtSwap(_ bytes: UInt64) -> String {
+        let raw: String
+        if bytes >= 1_000_000_000 {
+            raw = String(format: "%.1fG", Double(bytes) / 1_000_000_000)
+        } else {
+            raw = String(format: "%.0fM", Double(bytes) / 1_000_000)
+        }
+        return pad(raw, to: 4)
+    }
 
     private func fmtSpeed(_ bytesPerSec: Double) -> String {
         let raw: String
@@ -85,38 +206,5 @@ struct HUDView: View {
     private func pad(_ s: String, to width: Int) -> String {
         if s.count >= width { return s }
         return String(repeating: " ", count: width - s.count) + s
-    }
-
-    private func speedRow(arrow: String, speed: Double) -> some View {
-        HStack(spacing: 1) {
-            Text(arrow)
-                .font(.custom(currentFont, size: 11))
-                .foregroundColor(Color(red: 0.70, green: 0.55, blue: 0.92))
-            Text(fmtSpeed(speed))
-                .font(.custom(currentFont, size: 11))
-                .foregroundColor(.white.opacity(0.85))
-                .monospacedDigit()
-        }
-    }
-}
-
-// MARK: - Metric Row
-
-private struct MetricRow: View {
-    let label: String
-    let value: String
-    let color: Color
-    let font: String
-
-    var body: some View {
-        HStack(spacing: 1) {
-            Text(label)
-                .font(.custom(font, size: 8))
-                .foregroundColor(.white.opacity(0.4))
-            Text(value)
-                .font(.custom(font, size: 11))
-                .foregroundColor(color)
-                .monospacedDigit()
-        }
     }
 }

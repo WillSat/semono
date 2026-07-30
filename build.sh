@@ -18,10 +18,20 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
 cp "$BIN_PATH" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 
-# Copy power helper
+# Copy helpers
 HELPER_PATH="${BIN_DIR}/power_helper"
 if [ -f "$HELPER_PATH" ]; then
     cp "$HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/power_helper"
+fi
+
+GPU_HELPER_PATH="${BIN_DIR}/gpu_helper"
+if [ -f "$GPU_HELPER_PATH" ]; then
+    cp "$GPU_HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/gpu_helper"
+fi
+
+DISK_HELPER_PATH="${BIN_DIR}/disk_helper"
+if [ -f "$DISK_HELPER_PATH" ]; then
+    cp "$DISK_HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/disk_helper"
 fi
 
 # Generate app icon from icon.png
@@ -60,7 +70,7 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2</string>
+    <string>1.3</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

@@ -5,6 +5,7 @@ import CoreWLAN
 
 @MainActor
 final class MetricsCollector: ObservableObject {
+    @Published var gpuUsage: Double = 0
     @Published var cpuUsage: Double = 0
     @Published var memoryUsage: Double = 0
     @Published var powerUsage: Double = 0
@@ -12,6 +13,12 @@ final class MetricsCollector: ObservableObject {
     @Published var uploadSpeed: Double = 0
     @Published var networkType: String = ""
     @Published var wifiRSSI: Int = 0
+    @Published var memoryPressureLevel: Int = 0
+    @Published var swapBytes: UInt64 = 0
+    @Published var swapRatio: Double = 0
+    @Published var diskReadSpeed: Double = 0
+    @Published var diskWriteSpeed: Double = 0
+    @Published var thermalState: Int = 0
 
     private var prevCpuUsed: UInt64 = 0
     private var prevCpuTotal: UInt64 = 0
@@ -19,6 +26,10 @@ final class MetricsCollector: ObservableObject {
     private var prevNetTx: UInt64 = 0
     private var prevNetTime: Date = .now
     private var hasPrevNet: Bool = false
+    private var prevDiskReadBytes: UInt64 = 0
+    private var prevDiskWriteBytes: UInt64 = 0
+    private var prevDiskTime: Date = .now
+    private var hasPrevDisk: Bool = false
     private var updateTask: Task<Void, Never>?
     private var sampleCount: Int = 0
     private var cachedPower: Double = 0
@@ -39,22 +50,46 @@ final class MetricsCollector: ObservableObject {
     }
 
     private func sample() {
-        cpuUsage = readCPU()
-        memoryUsage = readMemory()
+        let s = SettingsStore.shared
+        let sb = s.statusBarMetric
+        let collectGPU = s.showComputeColumn || sb == "gpu"
+        let collectCPU = s.showComputeColumn || sb == "cpu"
+        let collectMemory = s.showMemoryColumn || sb == "memory"
+        let collectPower = s.showComputeColumn || sb == "pwr"
+        let collectStorage = s.showStorageColumn
+        let collectNetwork = s.showNetworkColumn
 
-        if sampleCount % 2 == 0 {
-            cachedPower = Self.readPower()
+        if collectGPU { gpuUsage = Self.readGPU() }
+        if collectCPU { cpuUsage = readCPU() }
+
+        if collectMemory {
+            memoryUsage = readMemory()
+            (memoryPressureLevel, swapBytes, swapRatio) = readSwapAndPressure()
         }
-        powerUsage = cachedPower
+
+        if collectStorage { thermalState = readThermalState() }
+
+        if collectPower {
+            if sampleCount % 2 == 0 { cachedPower = Self.readPower() }
+            powerUsage = cachedPower
+        }
+
+        if collectNetwork {
+            let (down, up) = readNetwork()
+            downloadSpeed = down
+            uploadSpeed = up
+            let (connType, rssi) = Self.readConnectionInfo()
+            networkType = connType
+            wifiRSSI = rssi
+        }
+
+        if collectStorage {
+            let (diskR, diskW) = readDisk()
+            diskReadSpeed = diskR
+            diskWriteSpeed = diskW
+        }
+
         sampleCount &+= 1
-
-        let (down, up) = readNetwork()
-        downloadSpeed = down
-        uploadSpeed = up
-
-        let (connType, rssi) = Self.readConnectionInfo()
-        networkType = connType
-        wifiRSSI = rssi
     }
 
     // MARK: - CPU
@@ -145,6 +180,67 @@ final class MetricsCollector: ObservableObject {
         return min(1.0, used / Self.totalMemory)
     }
 
+    // MARK: - Memory Pressure + Swap
+
+    private func readSwapAndPressure() -> (pressure: Int, swapBytes: UInt64, swapRatio: Double) {
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0)
+
+        var swapSize = 0
+        sysctlbyname("vm.swapusage", nil, &swapSize, nil, 0)
+        guard swapSize > 0 else { return (Int(level), 0, 0) }
+
+        var buf = [CChar](repeating: 0, count: swapSize)
+        sysctlbyname("vm.swapusage", &buf, &swapSize, nil, 0)
+        let str = String(cString: buf)
+
+        let usedBytes = parseSwapField(str, key: "used")
+        let totalBytes = parseSwapField(str, key: "total")
+        let ratio: Double = totalBytes > 0 ? min(1.0, Double(usedBytes) / Double(totalBytes)) : 0
+
+        return (Int(level), UInt64(usedBytes), ratio)
+    }
+
+    private func parseSwapField(_ str: String, key: String) -> Double {
+        guard let range = str.range(of: "\(key) = ") else { return 0 }
+        let after = str[range.upperBound...]
+        let parts = after.split(separator: " ")
+        guard let token = parts.first else { return 0 }
+        let raw = String(token)
+        guard let numEnd = raw.firstIndex(where: { !$0.isNumber && $0 != "." }) else { return 0 }
+        let value = Double(raw[..<numEnd]) ?? 0
+        let unit = String(raw[numEnd...]).uppercased()
+        switch unit {
+        case "G": return value * 1_000_000_000
+        case "M": return value * 1_000_000
+        case "K": return value * 1_000
+        default:  return value
+        }
+    }
+
+    // MARK: - Thermal
+
+    private func readThermalState() -> Int {
+        Int(ProcessInfo.processInfo.thermalState.rawValue)
+    }
+
+    // MARK: - GPU
+
+    nonisolated private static func readGPU() -> Double {
+        let helperURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/gpu_helper")
+        let task = Process()
+        task.executableURL = helperURL
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        guard let _ = try? task.run() else { return 0 }
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        return min(1.0, (Double(raw) ?? 0) / 100.0)
+    }
+
     // MARK: - Power
 
     nonisolated private static func readPower() -> Double {
@@ -159,6 +255,52 @@ final class MetricsCollector: ObservableObject {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
         return (Double(raw) ?? 0) / 1000.0
+    }
+
+    // MARK: - Disk
+
+    private func readDisk() -> (Double, Double) {
+        guard let (r, w) = Self.readDiskBytes() else {
+            return (0, 0)
+        }
+        let now = Date()
+
+        guard hasPrevDisk else {
+            prevDiskReadBytes = r; prevDiskWriteBytes = w; prevDiskTime = now
+            hasPrevDisk = true
+            return (0, 0)
+        }
+
+        let dt = now.timeIntervalSince(prevDiskTime)
+        guard dt > 0 else {
+            prevDiskReadBytes = r; prevDiskWriteBytes = w; prevDiskTime = now
+            return (0, 0)
+        }
+
+        let rDelta = r >= prevDiskReadBytes ? r - prevDiskReadBytes : 0
+        let wDelta = w >= prevDiskWriteBytes ? w - prevDiskWriteBytes : 0
+        let readSpeed  = Double(rDelta) / dt
+        let writeSpeed = Double(wDelta) / dt
+        prevDiskReadBytes = r; prevDiskWriteBytes = w; prevDiskTime = now
+        return (readSpeed, writeSpeed)
+    }
+
+    nonisolated private static func readDiskBytes() -> (UInt64, UInt64)? {
+        let helperURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/disk_helper")
+        let task = Process()
+        task.executableURL = helperURL
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        guard let _ = try? task.run() else { return nil }
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let parts = raw.split(separator: " ")
+        guard parts.count == 2,
+              let r = UInt64(parts[0]),
+              let w = UInt64(parts[1]) else { return nil }
+        return (r, w)
     }
 
     // MARK: - Network Bytes
