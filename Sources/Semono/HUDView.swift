@@ -111,18 +111,13 @@ struct HUDView: View {
                 .foregroundColor(.white.opacity(0.4))
             Spacer(minLength: minSpacer)
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 1)
+                Rectangle()
                     .fill(Color.gray.opacity(0.35))
-                RoundedRectangle(cornerRadius: 1)
+                Rectangle()
                     .fill(color)
-                    .frame(width: max(3, (barW - 2) * CGFloat(max(0, min(1, ratio)))))
-                    .padding(1)
+                    .frame(width: max(3, barW * CGFloat(max(0, min(1, ratio)))))
             }
             .frame(width: barW, height: barH)
-            .overlay(
-                RoundedRectangle(cornerRadius: 1)
-                    .stroke(Color.white.opacity(0.5), lineWidth: 0.5)
-            )
         }
         .frame(height: valueFontSz * 1.15)
     }
