@@ -20,6 +20,7 @@ final class SettingsStore: ObservableObject {
     @AppStorage("showStorageColumn") var showStorageColumn = true
     @AppStorage("showNetworkColumn") var showNetworkColumn = true
     @AppStorage("useBlockDisplay") var useBlockDisplay = false
+    @AppStorage("appLanguage") var appLanguage = LocaleManager.detectSystemLanguage()
 
     static let availableFonts: [(name: String, label: String)] = {
         var fonts: [(String, String)] = [("DepartureMono-Regular", "Departure Mono")]

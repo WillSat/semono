@@ -70,7 +70,7 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.3</string>
+    <string>1.4</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

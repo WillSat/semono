@@ -2,11 +2,14 @@ import Foundation
 import Darwin
 import SystemConfiguration
 import CoreWLAN
+import IOKit
 
 @MainActor
 final class MetricsCollector: ObservableObject {
     @Published var gpuUsage: Double = 0
     @Published var cpuUsage: Double = 0
+    @Published var perCoreCPU: [Double] = []
+    @Published var perCoreFreqMHz: [Double] = []
     @Published var memoryUsage: Double = 0
     @Published var powerUsage: Double = 0
     @Published var downloadSpeed: Double = 0
@@ -20,8 +23,12 @@ final class MetricsCollector: ObservableObject {
     @Published var diskWriteSpeed: Double = 0
     @Published var thermalState: Int = 0
 
+    init() {}
+
     private var prevCpuUsed: UInt64 = 0
     private var prevCpuTotal: UInt64 = 0
+    private var prevPerCoreUsed: [UInt64] = []
+    private var prevPerCoreTotal: [UInt64] = []
     private var prevNetRx: UInt64 = 0
     private var prevNetTx: UInt64 = 0
     private var prevNetTime: Date = .now
@@ -59,8 +66,13 @@ final class MetricsCollector: ObservableObject {
         let collectStorage = s.showStorageColumn
         let collectNetwork = s.showNetworkColumn
 
-        if collectGPU { gpuUsage = Self.readGPU() }
-        if collectCPU { cpuUsage = readCPU() }
+        if collectGPU {
+            gpuUsage = Self.readGPU()
+        }
+        if collectCPU {
+            (cpuUsage, perCoreCPU) = readCPU()
+            perCoreFreqMHz = Self.readPerCoreFrequencies()
+        }
 
         if collectMemory {
             memoryUsage = readMemory()
@@ -90,11 +102,15 @@ final class MetricsCollector: ObservableObject {
         }
 
         sampleCount &+= 1
+
+        Task { @MainActor in
+            MetricsHistory.shared.record(from: self)
+        }
     }
 
     // MARK: - CPU
 
-    private func readCPU() -> Double {
+    private func readCPU() -> (Double, [Double]) {
         var numCPUs: natural_t = 0
         var cpuInfo: processor_info_array_t!
         var numCpuInfo: mach_msg_type_number_t = 0
@@ -106,7 +122,7 @@ final class MetricsCollector: ObservableObject {
             &cpuInfo,
             &numCpuInfo
         )
-        guard result == KERN_SUCCESS, cpuInfo != nil else { return 0 }
+        guard result == KERN_SUCCESS, cpuInfo != nil else { return (0, []) }
 
         let cpuCount = Int(numCPUs)
         var user: UInt32 = 0
@@ -114,12 +130,25 @@ final class MetricsCollector: ObservableObject {
         var idle: UInt32 = 0
         var nice: UInt32 = 0
 
+        var perCoreNowUsed: [UInt64] = []
+        var perCoreNowTotal: [UInt64] = []
+
         for i in 0..<cpuCount {
             let base = Int(Self.kCPUStateMax) * i
-            user   += UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateUser))])
-            system += UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateSystem))])
-            idle   += UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateIdle))])
-            nice   += UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateNice))])
+            let u = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateUser))])
+            let s = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateSystem))])
+            let id = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateIdle))])
+            let n = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateNice))])
+
+            user   += u
+            system += s
+            idle   += id
+            nice   += n
+
+            let coreUsed = UInt64(u) + UInt64(s) + UInt64(n)
+            let coreTotal = coreUsed + UInt64(id)
+            perCoreNowUsed.append(coreUsed)
+            perCoreNowTotal.append(coreTotal)
         }
 
         let size = vm_size_t(MemoryLayout<integer_t>.stride * Int(numCpuInfo))
@@ -128,36 +157,39 @@ final class MetricsCollector: ObservableObject {
         let used = UInt64(user) + UInt64(system) + UInt64(nice)
         let total = used + UInt64(idle)
 
-        guard prevCpuTotal > 0, total > prevCpuTotal else {
-            prevCpuUsed = used
-            prevCpuTotal = total
-            return 0
+        var aggregate: Double = 0
+        if prevCpuTotal > 0, total > prevCpuTotal {
+            let usedDelta = used - prevCpuUsed
+            let totalDelta = total - prevCpuTotal
+            if totalDelta > 0 {
+                aggregate = min(1.0, Double(usedDelta) / Double(totalDelta))
+            }
         }
-
-        let usedDelta = used - prevCpuUsed
-        let totalDelta = total - prevCpuTotal
         prevCpuUsed = used
         prevCpuTotal = total
 
-        guard totalDelta > 0 else { return 0 }
-        return min(1.0, Double(usedDelta) / Double(totalDelta))
+        var perCore: [Double] = Array(repeating: 0, count: cpuCount)
+        if prevPerCoreUsed.count == cpuCount {
+            for i in 0..<cpuCount {
+                guard perCoreNowTotal[i] > prevPerCoreTotal[i],
+                      perCoreNowTotal[i] >= prevPerCoreTotal[i] else { continue }
+                let uDelta = perCoreNowUsed[i] - prevPerCoreUsed[i]
+                let tDelta = perCoreNowTotal[i] - prevPerCoreTotal[i]
+                if tDelta > 0 {
+                    perCore[i] = min(1.0, Double(uDelta) / Double(tDelta))
+                }
+            }
+        }
+        prevPerCoreUsed = perCoreNowUsed
+        prevPerCoreTotal = perCoreNowTotal
+
+        return (aggregate, perCore)
     }
 
     // MARK: - Memory
 
     private static let pageSize = Double(sysconf(Int32(_SC_PAGESIZE)))
-    private static let totalMemory: Double = {
-        var info = host_basic_info()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<host_basic_info_data_t>.size / MemoryLayout<integer_t>.size
-        )
-        withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                _ = host_info(mach_host_self(), HOST_BASIC_INFO, $0, &count)
-            }
-        }
-        return Double(info.max_mem)
-    }()
+    private static let totalMemory: Double = Double(readPhysicalMemory())
 
     private func readMemory() -> Double {
         var info = vm_statistics64()
@@ -350,6 +382,48 @@ final class MetricsCollector: ObservableObject {
             return ("WiFi", rssi)
         }
         return ("Eth", 0)
+    }
+
+    // MARK: - Hardware Info (collected once)
+
+    nonisolated private static func readPhysicalMemory() -> UInt64 {
+        var mem: UInt64 = 0
+        var size = MemoryLayout<UInt64>.size
+        sysctlbyname("hw.memsize", &mem, &size, nil, 0)
+        return mem
+    }
+
+    // MARK: - Frequency
+
+    nonisolated private static func readPerCoreFrequencies() -> [Double] {
+        var freqs: [Double] = []
+
+        var iterator: io_iterator_t = 0
+        let matching = IOServiceMatching("AppleARMCPU")
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return []
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var entry = IOIteratorNext(iterator)
+        while entry != 0 {
+            if let props = IORegistryEntryCreateCFProperty(entry, "cpu-frequency" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() {
+                var freq: UInt64 = 0
+                if CFGetTypeID(props) == CFNumberGetTypeID() {
+                    CFNumberGetValue(props as! CFNumber, .sInt64Type, &freq)
+                } else if CFGetTypeID(props) == CFDataGetTypeID() {
+                    let data = props as! CFData
+                    if CFDataGetLength(data) >= 8 {
+                        CFDataGetBytes(data, CFRange(location: 0, length: 8), &freq)
+                    }
+                }
+                freqs.append(Double(freq) / 1_000_000.0)
+            }
+            IOObjectRelease(entry)
+            entry = IOIteratorNext(iterator)
+        }
+
+        return freqs
     }
 
     // MARK: - Shared helpers

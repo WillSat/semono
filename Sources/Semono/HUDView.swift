@@ -3,6 +3,7 @@ import SwiftUI
 struct HUDView: View {
     @ObservedObject var metrics: MetricsCollector
     @ObservedObject var settings = SettingsStore.shared
+    let onDoubleClick: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -66,6 +67,10 @@ struct HUDView: View {
                 .fill(Color.black.opacity(settings.backgroundOpacity))
         )
         .fixedSize()
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            onDoubleClick?()
+        }
     }
 
     // MARK: - Dimensions

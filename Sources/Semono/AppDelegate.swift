@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hudWindowDelegate: WindowDelegate?
     private var settingsWindow: NSWindow?
     private var settingsWindowDelegate: WindowDelegate?
+    private var detailWindow: NSWindow?
+    private var detailWindowDelegate: WindowDelegate?
     private var statusItem: NSStatusItem?
     private var menubarView: MenubarContentView?
     private let metrics = MetricsCollector()
@@ -82,7 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
-        let hosting = NSHostingView(rootView: HUDView(metrics: metrics))
+        let hosting = NSHostingView(rootView: HUDView(metrics: metrics) { [weak self] in
+            self?.openDetail()
+        })
         hosting.translatesAutoresizingMaskIntoConstraints = false
         w.contentView = hosting
 
@@ -145,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         let settingsItem = NSMenuItem(
-            title: "Settings...",
+            title: LocaleManager.shared.localized("Settings..."),
             action: #selector(openSettings),
             keyEquivalent: ","
         )
@@ -155,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(
-            title: "Quit Semono",
+            title: LocaleManager.shared.localized("Quit Semono"),
             action: #selector(quitApp),
             keyEquivalent: "q"
         )
@@ -203,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        w.title = "Semono Settings"
+        w.title = LocaleManager.shared.localized("Semono Settings")
         w.level = .floating
         w.isReleasedWhenClosed = false
         w.contentView = NSHostingView(rootView: SettingsView(restartAction: { [weak self] in
@@ -232,6 +236,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         task.arguments = ["-c", "sleep 0.3; open '\(appURL.path)'"]
         try? task.run()
         NSApplication.shared.terminate(nil)
+    }
+
+    // MARK: - Detail Window
+
+    @objc private func openDetail() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let existing = detailWindow {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 780, height: 620),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = LocaleManager.shared.localized("Semono Monitor")
+        w.isReleasedWhenClosed = false
+        w.minSize = NSSize(width: 600, height: 420)
+        let hosting = NSHostingView(
+            rootView: DetailView(metrics: metrics)
+        )
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        w.contentView = hosting
+
+        w.center()
+        w.makeKeyAndOrderFront(nil)
+        detailWindow = w
+
+        let delegate = WindowDelegate(onClose: { [weak self] in
+            self?.detailWindow = nil
+            self?.detailWindowDelegate = nil
+        })
+        detailWindowDelegate = delegate
+        w.delegate = delegate
     }
 
     // MARK: - Font
