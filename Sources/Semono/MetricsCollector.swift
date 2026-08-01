@@ -25,6 +25,99 @@ final class MetricsCollector: ObservableObject {
 
     init() {}
 
+    private var updateTask: Task<Void, Never>?
+
+    func start() {
+        updateTask = Task { [weak self] in
+            var sampler = Sampler()
+            while !Task.isCancelled {
+                guard let self else { return }
+                let s = SettingsStore.shared
+                let sb = s.statusBarMetric
+                let flags = Sampler.Flags(
+                    collectGPU: s.showComputeColumn || sb == "gpu",
+                    collectCPU: s.showComputeColumn || sb == "cpu",
+                    collectMemory: s.showMemoryColumn || sb == "memory",
+                    collectPower: s.showComputeColumn || sb == "pwr",
+                    collectStorage: s.showStorageColumn,
+                    collectNetwork: s.showNetworkColumn
+                )
+                let sample = await sampler.sampleOnce(flags: flags)
+                self.apply(sample)
+                let interval = Double(SettingsStore.shared.refreshInterval)
+                try? await Task.sleep(for: .seconds(interval))
+            }
+        }
+    }
+
+    func stop() {
+        updateTask?.cancel()
+        updateTask = nil
+    }
+
+    /// Publishes a sample. @Published fires only on actual value changes so
+    /// the HUD does not re-render when the metrics are static.
+    private func apply(_ s: Sampler.Sample) {
+        if gpuUsage != s.gpuUsage { gpuUsage = s.gpuUsage }
+        if cpuUsage != s.cpuUsage { cpuUsage = s.cpuUsage }
+        if perCoreCPU != s.perCoreCPU { perCoreCPU = s.perCoreCPU }
+        if perCoreFreqMHz != s.perCoreFreqMHz { perCoreFreqMHz = s.perCoreFreqMHz }
+        if memoryUsage != s.memoryUsage { memoryUsage = s.memoryUsage }
+        if powerUsage != s.powerUsage { powerUsage = s.powerUsage }
+        if downloadSpeed != s.downloadSpeed { downloadSpeed = s.downloadSpeed }
+        if uploadSpeed != s.uploadSpeed { uploadSpeed = s.uploadSpeed }
+        if networkType != s.networkType { networkType = s.networkType }
+        if wifiRSSI != s.wifiRSSI { wifiRSSI = s.wifiRSSI }
+        if memoryPressureLevel != s.memoryPressureLevel { memoryPressureLevel = s.memoryPressureLevel }
+        if swapBytes != s.swapBytes { swapBytes = s.swapBytes }
+        if swapRatio != s.swapRatio { swapRatio = s.swapRatio }
+        if diskReadSpeed != s.diskReadSpeed { diskReadSpeed = s.diskReadSpeed }
+        if diskWriteSpeed != s.diskWriteSpeed { diskWriteSpeed = s.diskWriteSpeed }
+        if thermalState != s.thermalState { thermalState = s.thermalState }
+
+        MetricsHistory.shared.record(from: self)
+    }
+}
+
+// MARK: - Sampler
+
+/// Collects one metrics snapshot off the main actor. All heavy work (IOKit
+/// walks, CoreWLAN, helper subprocesses, mach/sysctl calls) runs on the
+/// cooperative pool; the main actor only receives the finished `Sample`.
+struct Sampler: Sendable {
+    struct Flags: Sendable {
+        var collectGPU: Bool
+        var collectCPU: Bool
+        var collectMemory: Bool
+        var collectPower: Bool
+        var collectStorage: Bool
+        var collectNetwork: Bool
+    }
+
+    struct Sample: Sendable {
+        var gpuUsage: Double = 0
+        var cpuUsage: Double = 0
+        var perCoreCPU: [Double] = []
+        var perCoreFreqMHz: [Double] = []
+        var memoryUsage: Double = 0
+        var powerUsage: Double = 0
+        var downloadSpeed: Double = 0
+        var uploadSpeed: Double = 0
+        var networkType: String = ""
+        var wifiRSSI: Int = 0
+        var memoryPressureLevel: Int = 0
+        var swapBytes: UInt64 = 0
+        var swapRatio: Double = 0
+        var diskReadSpeed: Double = 0
+        var diskWriteSpeed: Double = 0
+        var thermalState: Int = 0
+    }
+
+    // Slow-moving readings are cached and refreshed on longer intervals.
+    private static let freqCacheInterval: TimeInterval = 10
+    private static let connCacheInterval: TimeInterval = 5
+    private static let swapCacheInterval: TimeInterval = 5
+
     private var prevCpuUsed: UInt64 = 0
     private var prevCpuTotal: UInt64 = 0
     private var prevPerCoreUsed: [UInt64] = []
@@ -37,78 +130,73 @@ final class MetricsCollector: ObservableObject {
     private var prevDiskWriteBytes: UInt64 = 0
     private var prevDiskTime: Date = .now
     private var hasPrevDisk: Bool = false
-    private var updateTask: Task<Void, Never>?
     private var sampleCount: Int = 0
     private var cachedPower: Double = 0
+    private var freqCacheDate = Date.distantPast
+    private var cachedFreq: [Double] = []
+    private var connCacheDate = Date.distantPast
+    private var cachedConnType = ""
+    private var cachedRSSI = 0
+    private var swapCacheDate = Date.distantPast
+    private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
 
-    func start() {
-        updateTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                await self?.sample()
-                let interval = Double(SettingsStore.shared.refreshInterval)
-                try? await Task.sleep(for: .seconds(interval))
+    mutating func sampleOnce(flags: Flags) async -> Sample {
+        var s = Sample()
+        let now = Date()
+
+        if flags.collectGPU {
+            s.gpuUsage = await Self.readGPU()
+        }
+        if flags.collectCPU {
+            (s.cpuUsage, s.perCoreCPU) = readCPU()
+            if now.timeIntervalSince(freqCacheDate) >= Self.freqCacheInterval {
+                cachedFreq = Self.readPerCoreFrequencies()
+                freqCacheDate = now
             }
-        }
-    }
-
-    func stop() {
-        updateTask?.cancel()
-        updateTask = nil
-    }
-
-    private func sample() async {
-        let s = SettingsStore.shared
-        let sb = s.statusBarMetric
-        let collectGPU = s.showComputeColumn || sb == "gpu"
-        let collectCPU = s.showComputeColumn || sb == "cpu"
-        let collectMemory = s.showMemoryColumn || sb == "memory"
-        let collectPower = s.showComputeColumn || sb == "pwr"
-        let collectStorage = s.showStorageColumn
-        let collectNetwork = s.showNetworkColumn
-
-        if collectGPU {
-            gpuUsage = await Self.readGPU()
-        }
-        if collectCPU {
-            (cpuUsage, perCoreCPU) = readCPU()
-            perCoreFreqMHz = Self.readPerCoreFrequencies()
+            s.perCoreFreqMHz = cachedFreq
         }
 
-        if collectMemory {
-            memoryUsage = readMemory()
-            (memoryPressureLevel, swapBytes, swapRatio) = readSwapAndPressure()
+        if flags.collectMemory {
+            s.memoryUsage = Self.readMemory()
+            if now.timeIntervalSince(swapCacheDate) >= Self.swapCacheInterval {
+                cachedSwap = Self.readSwapAndPressure()
+                swapCacheDate = now
+            }
+            (s.memoryPressureLevel, s.swapBytes, s.swapRatio) = cachedSwap
         }
 
-        thermalState = readThermalState()
+        s.thermalState = Self.readThermalState()
 
-        if collectPower {
+        if flags.collectPower {
             if sampleCount % 2 == 0 { cachedPower = await Self.readPower() }
-            powerUsage = cachedPower
+            s.powerUsage = cachedPower
         }
 
-        if collectNetwork {
-            let (down, up) = readNetwork()
-            downloadSpeed = down
-            uploadSpeed = up
-            let (connType, rssi) = Self.readConnectionInfo()
-            networkType = connType
-            wifiRSSI = rssi
+        if flags.collectNetwork {
+            (s.downloadSpeed, s.uploadSpeed) = readNetwork()
+            if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval {
+                (cachedConnType, cachedRSSI) = Self.readConnectionInfo()
+                connCacheDate = now
+            }
+            s.networkType = cachedConnType
+            s.wifiRSSI = cachedRSSI
         }
 
-        if collectStorage {
-            let (diskR, diskW) = await readDisk()
-            diskReadSpeed = diskR
-            diskWriteSpeed = diskW
+        if flags.collectStorage {
+            // Staggered against the power helper so at most one helper spawns
+            // per tick.
+            if sampleCount % 2 == 1 {
+                (s.diskReadSpeed, s.diskWriteSpeed) = await readDisk()
+            }
         }
 
         sampleCount &+= 1
-
-        MetricsHistory.shared.record(from: self)
+        return s
     }
 
     // MARK: - CPU
 
-    private func readCPU() -> (Double, [Double]) {
+    private mutating func readCPU() -> (Double, [Double]) {
         var numCPUs: natural_t = 0
         var cpuInfo: processor_info_array_t!
         var numCpuInfo: mach_msg_type_number_t = 0
@@ -188,7 +276,7 @@ final class MetricsCollector: ObservableObject {
     private static let pageSize = Double(sysconf(Int32(_SC_PAGESIZE)))
     private static let totalMemory: Double = Double(readPhysicalMemory())
 
-    private func readMemory() -> Double {
+    private static func readMemory() -> Double {
         var info = vm_statistics64()
         var count = mach_msg_type_number_t(
             MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
@@ -211,7 +299,7 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Memory Pressure + Swap
 
-    private func readSwapAndPressure() -> (pressure: Int, swapBytes: UInt64, swapRatio: Double) {
+    private static func readSwapAndPressure() -> (pressure: Int, swapBytes: UInt64, swapRatio: Double) {
         var level: Int32 = 0
         var size = MemoryLayout<Int32>.size
         sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0)
@@ -231,7 +319,7 @@ final class MetricsCollector: ObservableObject {
         return (Int(level), UInt64(usedBytes), ratio)
     }
 
-    private func parseSwapField(_ str: String, key: String) -> Double {
+    private static func parseSwapField(_ str: String, key: String) -> Double {
         guard let range = str.range(of: "\(key) = ") else { return 0 }
         let after = str[range.upperBound...]
         let parts = after.split(separator: " ")
@@ -250,27 +338,27 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Thermal
 
-    private func readThermalState() -> Int {
+    private static func readThermalState() -> Int {
         Int(ProcessInfo.processInfo.thermalState.rawValue)
     }
 
     // MARK: - GPU
 
-    nonisolated private static func readGPU() async -> Double {
+    private static func readGPU() async -> Double {
         let raw = await runHelper("gpu_helper")
         return min(1.0, (Double(raw) ?? 0) / 100.0)
     }
 
     // MARK: - Power
 
-    nonisolated private static func readPower() async -> Double {
+    private static func readPower() async -> Double {
         let raw = await runHelper("power_helper")
         return (Double(raw) ?? 0) / 1000.0
     }
 
     // MARK: - Disk
 
-    private func readDisk() async -> (Double, Double) {
+    private mutating func readDisk() async -> (Double, Double) {
         guard let (r, w) = await Self.readDiskBytes() else {
             return (0, 0)
         }
@@ -296,7 +384,7 @@ final class MetricsCollector: ObservableObject {
         return (readSpeed, writeSpeed)
     }
 
-    nonisolated private static func readDiskBytes() async -> (UInt64, UInt64)? {
+    private static func readDiskBytes() async -> (UInt64, UInt64)? {
         let raw = await runHelper("disk_helper")
         let parts = raw.split(separator: " ")
         guard parts.count == 2,
@@ -307,7 +395,7 @@ final class MetricsCollector: ObservableObject {
 
     /// Runs a bundled helper binary off the main thread with a timeout.
     /// A hung helper no longer blocks the UI; it is terminated and reported as "0".
-    nonisolated private static func runHelper(_ name: String, timeout: TimeInterval = 2.0) async -> String {
+    private static func runHelper(_ name: String, timeout: TimeInterval = 1.0) async -> String {
         let helper = HelperProcess(name: name)
         return await withTaskGroup(of: String.self) { group in
             group.addTask {
@@ -326,7 +414,7 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Network Bytes
 
-    private func readNetwork() -> (Double, Double) {
+    private mutating func readNetwork() -> (Double, Double) {
         guard let (tx, rx) = Self.readNetworkBytes() else {
             return (0, 0)
         }
@@ -354,7 +442,7 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Connection type + RSSI
 
-    nonisolated private static func readConnectionInfo() -> (type: String, rssi: Int) {
+    private static func readConnectionInfo() -> (type: String, rssi: Int) {
         guard let store = SCDynamicStoreCreate(nil, "Semono" as CFString, nil, nil) else {
             return ("---", 0)
         }
@@ -375,7 +463,7 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Hardware Info (collected once)
 
-    nonisolated private static func readPhysicalMemory() -> UInt64 {
+    private static func readPhysicalMemory() -> UInt64 {
         var mem: UInt64 = 0
         var size = MemoryLayout<UInt64>.size
         sysctlbyname("hw.memsize", &mem, &size, nil, 0)
@@ -384,7 +472,7 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Frequency
 
-    nonisolated private static func readPerCoreFrequencies() -> [Double] {
+    private static func readPerCoreFrequencies() -> [Double] {
         var freqs: [Double] = []
 
         var iterator: io_iterator_t = 0
@@ -417,7 +505,7 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - Shared helpers
 
-    nonisolated private static func readNetworkBytes() -> (tx: UInt64, rx: UInt64)? {
+    private static func readNetworkBytes() -> (tx: UInt64, rx: UInt64)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(first) }

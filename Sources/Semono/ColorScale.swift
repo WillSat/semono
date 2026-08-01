@@ -12,9 +12,15 @@ enum ColorScale {
         (1.0,  NSColor(hex: 0xEF5350).usingColorSpace(.sRGB)!),
     ]
 
-    static func color(for usage: Double) -> Color {
-        let t = max(0, min(1, usage))
+    /// Precomputed 0–100% palette, built once from the anchors. Lookup is a
+    /// single array index — no interpolation or NSColor bridging at render time.
+    static let palette: [Color] = (0...100).map { interpolate(Double($0) / 100.0) }
 
+    static func color(for usage: Double) -> Color {
+        palette[Int((max(0, min(1, usage)) * 100.0).rounded())]
+    }
+
+    private static func interpolate(_ t: Double) -> Color {
         var lower = anchors[0]
         var upper = anchors[anchors.count - 1]
         for i in 0..<(anchors.count - 1) {

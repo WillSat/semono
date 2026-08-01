@@ -1,57 +1,62 @@
 import AppKit
 
+/// Custom-drawn status bar readout. Drawn text (instead of NSTextField
+/// subviews) means no tracking areas or cursor rects live in the menu bar
+/// region, and updates only invalidate the layer instead of re-snapshotting
+/// AppKit text views every tick.
 final class MenubarContentView: NSView {
-    private let valueLabel = NSTextField(labelWithString: "")
-    private let typeLabel  = NSTextField(labelWithString: "")
+    var displayText: String = "" {
+        didSet {
+            if displayText != oldValue { needsDisplay = true }
+        }
+    }
+    var displayType: String = "CPU" {
+        didSet {
+            if displayType != oldValue { needsDisplay = true }
+        }
+    }
 
-    var displayText: String = "" { didSet { valueLabel.stringValue = displayText } }
-    var displayType: String = "CPU" { didSet { typeLabel.stringValue = displayType } }
+    private var valueAttrs: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+    }
+
+    private var typeAttrs: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 6.5, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+    }
 
     /// Width required by the currently displayed content.
     var fittingWidth: CGFloat {
-        let valueW = valueLabel.attributedStringValue.size().width
-        let typeW = typeLabel.attributedStringValue.size().width
+        let valueW = NSAttributedString(string: displayText, attributes: valueAttrs).size().width
+        let typeW = NSAttributedString(string: displayType, attributes: typeAttrs).size().width
         return ceil(max(valueW, typeW)) + 10
-    }
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-
-        valueLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-        valueLabel.alignment = .center
-        valueLabel.textColor = .labelColor
-        valueLabel.lineBreakMode = .byClipping
-
-        typeLabel.font = .systemFont(ofSize: 6.5, weight: .medium)
-        typeLabel.alignment = .center
-        typeLabel.textColor = .secondaryLabelColor
-        typeLabel.lineBreakMode = .byClipping
-
-        addSubview(valueLabel)
-        addSubview(typeLabel)
-
-        valueLabel.translatesAutoresizingMaskIntoConstraints = false
-        typeLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        NSLayoutConstraint.activate([
-            valueLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            valueLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-            typeLabel.topAnchor.constraint(equalTo: valueLabel.bottomAnchor, constant: -1),
-            typeLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            typeLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            typeLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
-        ])
-
-        translatesAutoresizingMaskIntoConstraints = false
     }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: fittingWidth, height: NSStatusBar.system.thickness)
     }
 
-    required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let value = NSAttributedString(string: displayText, attributes: valueAttrs)
+        let type = NSAttributedString(string: displayType, attributes: typeAttrs)
+        let valueSize = value.size()
+        let typeSize = type.size()
+        let maxWidth = max(valueSize.width, typeSize.width)
+
+        let x = (bounds.width - maxWidth) / 2
+        let totalHeight = valueSize.height + typeSize.height - 1
+        let y = (bounds.height - totalHeight) / 2
+
+        type.draw(at: NSPoint(x: x, y: y))
+        value.draw(at: NSPoint(x: x, y: y + typeSize.height - 1))
+    }
 
     override func mouseDown(with event: NSEvent) {
         if let menu = self.menu {

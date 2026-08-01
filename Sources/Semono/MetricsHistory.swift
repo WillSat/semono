@@ -47,7 +47,7 @@ final class MetricsHistory: ObservableObject {
         )
         snapshots.append(snap)
         if snapshots.count > Self.maxDataPoints {
-            snapshots = Array(snapshots.suffix(Self.maxDataPoints))
+            snapshots.removeFirst(snapshots.count - Self.maxDataPoints)
         }
     }
 }

@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 
 enum DetailPage: String, CaseIterable, Hashable, Identifiable {
     case cpu, gpu, memory, storage, network, other
@@ -385,8 +384,6 @@ struct PageHero: View {
                     .foregroundStyle(latestColor)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .contentTransition(.numericText())
-                    .animation(.snappy(duration: 0.35), value: values.last)
                 if !unit.isEmpty {
                     Text(unit)
                         .font(.title3)
@@ -506,8 +503,6 @@ struct MetricChart: View {
                     .foregroundStyle(latestColor)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .contentTransition(.numericText())
-                    .animation(.snappy(duration: 0.35), value: last)
             }
             if !unit.isEmpty {
                 Text(unit)
@@ -538,6 +533,9 @@ struct MetricChart: View {
 
 // MARK: - Sparkline
 
+/// Lightweight self-drawn sparkline — a smooth polyline with a soft gradient
+/// fill. Replaces Swift Charts: no display-list machinery, no per-mark
+/// tracking areas, so per-tick redraws cost a fraction of a Chart's.
 private struct Sparkline: View {
     let values: [Double]
     let color: Color
@@ -545,33 +543,65 @@ private struct Sparkline: View {
     var lineWidth: CGFloat = 2
 
     var body: some View {
-        Chart {
-            ForEach(Array(values.enumerated()), id: \.offset) { idx, v in
-                AreaMark(
-                    x: .value("Index", idx),
-                    y: .value("Value", v)
-                )
-                .interpolationMethod(.monotone)
-                .foregroundStyle(
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let line = Self.linePath(Self.points(values: values, width: w, height: h))
+            ZStack {
+                Self.areaPath(area: line, width: w, height: h).fill(
                     LinearGradient(
                         colors: [color.opacity(0.28), color.opacity(0.02)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
                 )
-                LineMark(
-                    x: .value("Index", idx),
-                    y: .value("Value", v)
+                line.stroke(
+                    color,
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                 )
-                .interpolationMethod(.monotone)
-                .foregroundStyle(color)
-                .lineStyle(StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
             }
         }
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
-        .chartYScale(domain: 0...1)
         .frame(height: height)
+    }
+
+    private static func areaPath(area line: Path, width: CGFloat, height: CGFloat) -> Path {
+        var area = line
+        area.addLine(to: CGPoint(x: width, y: height))
+        area.addLine(to: CGPoint(x: 0, y: height))
+        area.closeSubpath()
+        return area
+    }
+
+    private static func points(values: [Double], width: CGFloat, height: CGFloat) -> [CGPoint] {
+        guard values.count > 1, width > 0, height > 0 else { return [] }
+        let stepX = width / CGFloat(values.count - 1)
+        return values.enumerated().map { idx, v in
+            CGPoint(
+                x: CGFloat(idx) * stepX,
+                y: height - CGFloat(max(0, min(1, v))) * height
+            )
+        }
+    }
+
+    /// Smooth curve through the points: quadratic beziers via midpoints,
+    /// approximating the monotone interpolation the chart previously used.
+    private static func linePath(_ pts: [CGPoint]) -> Path {
+        var path = Path()
+        guard let first = pts.first else { return path }
+        path.move(to: first)
+        guard pts.count > 2 else {
+            if pts.count == 2 { path.addLine(to: pts[1]) }
+            return path
+        }
+        for i in 1..<(pts.count - 1) {
+            let mid = CGPoint(
+                x: (pts[i].x + pts[i + 1].x) / 2,
+                y: (pts[i].y + pts[i + 1].y) / 2
+            )
+            path.addQuadCurve(to: mid, control: pts[i])
+        }
+        path.addLine(to: pts[pts.count - 1])
+        return path
     }
 }
 

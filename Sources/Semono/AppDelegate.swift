@@ -219,10 +219,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text = "\(Int(metrics.cpuUsage * 100))%"
             type = "CPU"
         }
-        menubarView?.displayText = text
-        menubarView?.displayType = type
-        if let view = menubarView {
-            statusItem?.length = max(28, view.fittingWidth)
+        guard let view = menubarView,
+              text != view.displayText || type != view.displayType
+        else { return }
+        view.displayText = text
+        view.displayType = type
+        let width = max(28, view.fittingWidth)
+        if statusItem?.length != width {
+            statusItem?.length = width
         }
     }
 
