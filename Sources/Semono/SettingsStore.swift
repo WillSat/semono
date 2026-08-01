@@ -5,7 +5,7 @@ import ServiceManagement
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
-    @AppStorage("refreshInterval") var refreshInterval = 2
+    @AppStorage("refreshInterval") var refreshInterval = 1
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("backgroundOpacity") var backgroundOpacity = 0.6
     @AppStorage("hudX") var hudX: Double = -1
@@ -49,7 +49,7 @@ final class SettingsStore: ObservableObject {
         if launchAtLogin {
             try? SMAppService.mainApp.unregister()
         }
-        refreshInterval = 2
+        refreshInterval = 1
         launchAtLogin = false
         backgroundOpacity = 0.6
         hudX = -1
