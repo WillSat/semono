@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         .merge(with: metrics.$memoryUsage.map { _ in })
         .merge(with: metrics.$powerUsage.map { _ in })
+        .merge(with: metrics.$isSleeping.map { _ in })
         .merge(with: SettingsStore.shared.objectWillChange)
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.updateStatusBarTitle() }
@@ -221,9 +222,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let view = menubarView,
               text != view.displayText || type != view.displayType
+                || metrics.isSleeping != view.isSleeping
         else { return }
         view.displayText = text
         view.displayType = type
+        view.isSleeping = metrics.isSleeping
         let width = max(28, view.fittingWidth)
         if statusItem?.length != width {
             statusItem?.length = width

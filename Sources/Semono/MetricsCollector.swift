@@ -22,8 +22,12 @@ final class MetricsCollector: ObservableObject {
     @Published var diskReadSpeed: Double = 0
     @Published var diskWriteSpeed: Double = 0
     @Published var thermalState: Int = 0
+    /// Adaptive sleep: sampling drops to 10s while CPU is stable.
+    @Published var isSleeping = false
 
     init() {}
+
+    private static let sleepIntervalSeconds = 10.0
 
     private var updateTask: Task<Void, Never>?
 
@@ -44,9 +48,35 @@ final class MetricsCollector: ObservableObject {
                 )
                 let sample = await sampler.sampleOnce(flags: flags)
                 self.apply(sample)
-                let interval = Double(SettingsStore.shared.refreshInterval)
+
+                self.updateSleepState(with: sample.cpuRangePct)
+                let interval = self.isSleeping
+                    ? Self.sleepIntervalSeconds
+                    : Double(SettingsStore.shared.refreshInterval)
                 try? await Task.sleep(for: .seconds(interval))
             }
+        }
+    }
+
+    /// Hysteresis state machine: sleep when the CPU range of the last
+    /// `sleepWindow` samples stays within the sensitivity; wake when it
+    /// exceeds sensitivity + hysteresis. Disabled toggle forces wake.
+    private func updateSleepState(with range: Double?) {
+        let store = SettingsStore.shared
+        guard store.adaptiveSleep else {
+            if isSleeping { isSleeping = false }
+            return
+        }
+        guard let range else { return }
+
+        let target: Bool
+        if isSleeping {
+            target = range < store.sleepSensitivity + store.sleepHysteresis
+        } else {
+            target = range <= store.sleepSensitivity
+        }
+        if isSleeping != target {
+            isSleeping = target
         }
     }
 
@@ -111,12 +141,18 @@ struct Sampler: Sendable {
         var diskReadSpeed: Double = 0
         var diskWriteSpeed: Double = 0
         var thermalState: Int = 0
+        /// Range (max − min) of the last `sleepWindow` CPU samples in percent
+        /// points. nil until the window fills, so sleep never engages on
+        /// startup.
+        var cpuRangePct: Double? = nil
     }
 
     // Slow-moving readings are cached and refreshed on longer intervals.
     private static let freqCacheInterval: TimeInterval = 10
     private static let connCacheInterval: TimeInterval = 5
     private static let swapCacheInterval: TimeInterval = 5
+    /// Rolling window used to judge CPU stability for adaptive sleep.
+    static let sleepWindow = 5
 
     private var prevCpuUsed: UInt64 = 0
     private var prevCpuTotal: UInt64 = 0
@@ -139,6 +175,7 @@ struct Sampler: Sendable {
     private var cachedRSSI = 0
     private var swapCacheDate = Date.distantPast
     private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
+    private var cpuHistory: [Double] = []
 
     mutating func sampleOnce(flags: Flags) async -> Sample {
         var s = Sample()
@@ -154,6 +191,14 @@ struct Sampler: Sendable {
                 freqCacheDate = now
             }
             s.perCoreFreqMHz = cachedFreq
+
+            cpuHistory.append(s.cpuUsage * 100)
+            if cpuHistory.count > Self.sleepWindow {
+                cpuHistory.removeFirst(cpuHistory.count - Self.sleepWindow)
+            }
+            if cpuHistory.count >= Self.sleepWindow {
+                s.cpuRangePct = (cpuHistory.max() ?? 0) - (cpuHistory.min() ?? 0)
+            }
         }
 
         if flags.collectMemory {

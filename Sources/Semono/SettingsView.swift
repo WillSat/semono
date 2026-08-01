@@ -150,6 +150,35 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 150)
                 }
+                Toggle(locale.localized("Adaptive Sleep"), isOn: $settings.adaptiveSleep)
+
+                if settings.adaptiveSleep {
+                    LabeledContent(locale.localized("Sleep Sensitivity")) {
+                        HStack(spacing: 8) {
+                            Slider(value: $settings.sleepSensitivity, in: 3...20, step: 1)
+                                .frame(width: 170)
+                            Text("\(Int(settings.sleepSensitivity))%")
+                                .font(.system(.body, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    }
+                    LabeledContent(locale.localized("Hysteresis")) {
+                        HStack(spacing: 8) {
+                            Slider(value: $settings.sleepHysteresis, in: 1...10, step: 1)
+                                .frame(width: 170)
+                            Text("\(Int(settings.sleepHysteresis))%")
+                                .font(.system(.body, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    }
+                    Text(locale.localized("Sleep when the last 5 CPU samples stay within the sensitivity; wake when they exceed sensitivity + hysteresis."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Toggle(locale.localized("Launch at Login"), isOn: loginBinding)
             } header: {
                 SettingsSectionHeader(icon: "gearshape", title: locale.localized("General"))
