@@ -8,23 +8,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var window: NSWindow?
     private var hudWindowDelegate: WindowDelegate?
-    private var settingsWindow: NSWindow?
-    private var settingsWindowDelegate: WindowDelegate?
-    private var detailWindow: NSWindow?
-    private var detailWindowDelegate: WindowDelegate?
     private var statusItem: NSStatusItem?
     private var menubarView: MenubarContentView?
-    private let metrics = MetricsCollector()
+    let metrics = MetricsCollector()
     private var saveFrameTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
         registerFont()
         setupStatusBar()
         showHUD()
         metrics.start()
         syncLoginItemState()
         observeMetrics()
+        observeSettings()
 
         NotificationCenter.default.addObserver(
             self,
@@ -32,6 +30,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+
+        if CommandLine.arguments.contains("--open-windows") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                NSApp.activate()
+                WindowRouter.openMonitor?()
+                WindowRouter.openSettings?()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
@@ -59,7 +68,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .store(in: &cancellables)
     }
 
-    // MARK: - Window
+    private func observeSettings() {
+        var lastFullscreen = SettingsStore.shared.showInFullscreen
+        SettingsStore.shared.objectWillChange
+            .sink { [weak self] _ in
+                let now = SettingsStore.shared.showInFullscreen
+                guard now != lastFullscreen else { return }
+                lastFullscreen = now
+                self?.applyFullscreenBehavior(now)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyFullscreenBehavior(_ enabled: Bool) {
+        guard let w = window else { return }
+        w.collectionBehavior.remove(.fullScreenAuxiliary)
+        w.collectionBehavior.remove(.fullScreenNone)
+        w.collectionBehavior.insert(enabled ? .fullScreenAuxiliary : .fullScreenNone)
+    }
+
+    // MARK: - HUD Window
 
     private func showHUD() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
@@ -76,11 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.hasShadow = false
         w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         w.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
-        if SettingsStore.shared.showInFullscreen {
-            w.collectionBehavior.insert(.fullScreenAuxiliary)
-        } else {
-            w.collectionBehavior.insert(.fullScreenNone)
-        }
+        applyFullscreenBehavior(SettingsStore.shared.showInFullscreen)
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
@@ -106,10 +130,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func reposition() {
-        let screen = window?.screen ?? NSScreen.main ?? NSScreen.screens.first
+        guard let w = window else { return }
+        let screen = w.screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
-        let frame = hudFrame(for: screen)
-        window?.setFrame(frame, display: true, animate: false)
+        w.setFrame(hudFrame(for: screen), display: true, animate: false)
     }
 
     private func scheduleSaveFrame(_ w: NSWindow?) {
@@ -127,17 +151,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsStore.shared.hudY = f.origin.y
         SettingsStore.shared.hudWidth = f.size.width
         SettingsStore.shared.hudHeight = f.size.height
+        SettingsStore.shared.hudHasSavedPosition = true
     }
 
+    /// Restores the saved frame as-is (no position clamping — the HUD may be
+    /// tucked anywhere), or the default corner on first launch or when the
+    /// saved frame's screen is gone.
     private func hudFrame(for screen: NSScreen) -> NSRect {
-        let x = SettingsStore.shared.hudX
-        let y = SettingsStore.shared.hudY
-        let w = SettingsStore.shared.hudWidth
-        let h = SettingsStore.shared.hudHeight
-        if x >= 0, y >= 0, w > 0, h > 0 {
-            return NSRect(x: x, y: y, width: w, height: h)
+        let store = SettingsStore.shared
+        let hasSaved = store.hudHasSavedPosition || (store.hudX != -1 && store.hudY != -1)
+        guard hasSaved, store.hudWidth > 0, store.hudHeight > 0 else {
+            return DockDetector.defaultFrame(for: screen)
         }
-        return DockDetector.defaultFrame(for: screen)
+        let frame = NSRect(x: store.hudX, y: store.hudY, width: store.hudWidth, height: store.hudHeight)
+        guard NSScreen.screens.contains(where: { $0.frame.intersects(frame) }) else {
+            return DockDetector.defaultFrame(for: screen)
+        }
+        return frame
     }
 
     // MARK: - Status Bar
@@ -191,87 +221,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menubarView?.displayText = text
         menubarView?.displayType = type
+        if let view = menubarView {
+            statusItem?.length = max(28, view.fittingWidth)
+        }
     }
 
+    // MARK: - Window Opening
+
     @objc private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         syncLoginItemState()
-        if let existing = settingsWindow {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
+        WindowRouter.openSettings?()
+    }
 
-        let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 420),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        w.title = LocaleManager.shared.localized("Semono Settings")
-        w.level = .floating
-        w.isReleasedWhenClosed = false
-        w.contentView = NSHostingView(rootView: SettingsView(restartAction: { [weak self] in
-            self?.restartApp()
-        }))
-        w.center()
-        w.makeKeyAndOrderFront(nil)
-        settingsWindow = w
-
-        let delegate = WindowDelegate(onClose: { [weak self] in
-            self?.settingsWindow = nil
-            self?.settingsWindowDelegate = nil
-        })
-        settingsWindowDelegate = delegate
-        w.delegate = delegate
+    @objc private func openDetail() {
+        NSApp.activate()
+        WindowRouter.openMonitor?()
     }
 
     @objc private func quitApp() {
         NSApplication.shared.terminate(nil)
-    }
-
-    private func restartApp() {
-        let appURL = Bundle.main.bundleURL
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "sleep 0.3; open '\(appURL.path)'"]
-        try? task.run()
-        NSApplication.shared.terminate(nil)
-    }
-
-    // MARK: - Detail Window
-
-    @objc private func openDetail() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let existing = detailWindow {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 620),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        w.title = LocaleManager.shared.localized("Semono Monitor")
-        w.isReleasedWhenClosed = false
-        w.minSize = NSSize(width: 600, height: 420)
-        let hosting = NSHostingView(
-            rootView: DetailView(metrics: metrics)
-        )
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        w.contentView = hosting
-
-        w.center()
-        w.makeKeyAndOrderFront(nil)
-        detailWindow = w
-
-        let delegate = WindowDelegate(onClose: { [weak self] in
-            self?.detailWindow = nil
-            self?.detailWindowDelegate = nil
-        })
-        detailWindowDelegate = delegate
-        w.delegate = delegate
     }
 
     // MARK: - Font

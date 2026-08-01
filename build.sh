@@ -4,6 +4,15 @@ set -euo pipefail
 APP_NAME="Semono"
 BUILD_CONFIG="${1:-release}"
 
+# Prefer an Xcode toolchain: the macOS 26+ SDK turns @State into a macro whose
+# implementation only ships with Xcode, not CommandLineTools.
+for dir in "/Applications/Xcode.app" "/Applications/Xcode-beta.app"; do
+    if [ -d "$dir/Contents/Developer" ] && [ -z "${DEVELOPER_DIR:-}" ]; then
+        export DEVELOPER_DIR="$dir/Contents/Developer"
+        break
+    fi
+done
+
 echo "==> Building ${APP_NAME} (${BUILD_CONFIG})..."
 swift build -c "$BUILD_CONFIG"
 
@@ -70,7 +79,9 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.4</string>
+    <string>1.5</string>
+    <key>CFBundleVersion</key>
+    <string>15</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
@@ -80,6 +91,14 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Ad-hoc code sign the bundle (required for SMAppService launch-at-login;
+# replace with a proper Developer ID signature for distribution)
+if codesign --force --deep --sign - "${BUNDLE_DIR}" >/dev/null 2>&1; then
+    echo "==> Ad-hoc codesigned"
+else
+    echo "==> warning: ad-hoc codesign failed"
+fi
 
 echo "==> App bundle created at ${BUNDLE_DIR}"
 echo "==> Run: open ${BUNDLE_DIR}"

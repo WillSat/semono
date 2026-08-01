@@ -1,6 +1,9 @@
 import SwiftUI
 
 enum ColorScale {
+    /// App-wide accent (the cyan end of the heat scale).
+    static let accent = Color(nsColor: NSColor(hex: 0x4FC3F7))
+
     private static let anchors: [(Double, NSColor)] = [
         (0.0,  NSColor(hex: 0x4FC3F7).usingColorSpace(.sRGB)!),
         (0.25, NSColor(hex: 0x66BB6A).usingColorSpace(.sRGB)!),

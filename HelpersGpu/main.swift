@@ -17,8 +17,8 @@ guard IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0) == 
 else { print("0"); exit(0) }
 
 if let perfStats = dict["PerformanceStatistics"] as? [String: Any],
-   let gpuUtil = perfStats["Device Utilization %"] as? Int {
-    print(gpuUtil)
+   let gpuUtil = perfStats["Device Utilization %"] as? NSNumber {
+    print(gpuUtil.intValue)
 } else {
     print("0")
 }

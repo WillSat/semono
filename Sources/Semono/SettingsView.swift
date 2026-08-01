@@ -1,156 +1,190 @@
 import SwiftUI
 import ServiceManagement
 
-enum SettingsTab: String, CaseIterable {
+enum SettingsTab: String, CaseIterable, Hashable, Identifiable {
     case display, columns, general
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .display: "display"
+        case .columns: "rectangle.grid.2x2"
+        case .general: "gearshape"
+        }
+    }
+
+    var titleKey: String {
+        switch self {
+        case .display: "Display"
+        case .columns: "Columns"
+        case .general: "General"
+        }
+    }
 }
 
-final class SettingsViewState: ObservableObject {
-    @Published var selectedTab: SettingsTab = .display
-}
-
+/// Standard macOS settings on the macOS 26/27 design language: sidebar-
+/// adaptable TabView (Liquid Glass sidebar on macOS 26+) with icon-led
+/// grouped sections in the System Settings style.
 struct SettingsView: View {
     @ObservedObject var settings = SettingsStore.shared
     @ObservedObject var locale = LocaleManager.shared
-    @ObservedObject private var state = SettingsViewState()
-    let restartAction: () -> Void
+    @State private var selectedTab: SettingsTab = .display
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $state.selectedTab) {
-                Text(locale.localized("Display")).tag(SettingsTab.display)
-                Text(locale.localized("Columns")).tag(SettingsTab.columns)
-                Text(locale.localized("General")).tag(SettingsTab.general)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-
-            Divider()
-                .padding(.horizontal, 12)
-
-            ScrollView {
-                tabContent
-                    .padding(16)
-            }
-
-            Divider()
-                .padding(.horizontal, 12)
-
-            HStack {
-                Spacer()
-                Button(locale.localized("Apply")) {
-                    restartAction()
+        TabView(selection: $selectedTab) {
+            displayTab
+                .tabItem {
+                    Label(locale.localized(SettingsTab.display.titleKey), systemImage: SettingsTab.display.icon)
                 }
-                .keyboardShortcut(.return)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-            }
+                .tag(SettingsTab.display)
+
+            columnsTab
+                .tabItem {
+                    Label(locale.localized(SettingsTab.columns.titleKey), systemImage: SettingsTab.columns.icon)
+                }
+                .tag(SettingsTab.columns)
+
+            generalTab
+                .tabItem {
+                    Label(locale.localized(SettingsTab.general.titleKey), systemImage: SettingsTab.general.icon)
+                }
+                .tag(SettingsTab.general)
         }
-        .frame(width: 320, height: 400)
-        .fixedSize()
+        .tabViewStyle(.sidebarAdaptable)
+        .toolbar(removing: .sidebarToggle)
     }
 
-    @ViewBuilder
-    private var tabContent: some View {
-        switch state.selectedTab {
-        case .display: displayTab
-        case .columns: columnsTab
-        case .general: generalTab
-        }
-    }
-
-    // MARK: - Display Tab
+    // MARK: - Display
 
     private var displayTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("\(locale.localized("Opacity")): \(Int(settings.backgroundOpacity * 100))%")
-                    .font(.caption)
-                Slider(value: $settings.backgroundOpacity, in: 0.0...1.0)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("\(locale.localized("Font Scale")): \(Int(settings.fontScale))")
-                    .font(.caption)
-                Slider(value: $settings.fontScale, in: -5...10, step: 1)
-            }
-
-            HStack {
-                Text(locale.localized("Font:"))
-                    .font(.caption)
-                Spacer()
-                Picker("", selection: $settings.fontName) {
-                    ForEach(SettingsStore.availableFonts, id: \.name) { f in
-                        Text(f.label).tag(f.name)
+        Form {
+            Section {
+                LabeledContent(locale.localized("Opacity")) {
+                    HStack(spacing: 8) {
+                        Slider(value: $settings.backgroundOpacity, in: 0.0...1.0, step: 0.05)
+                            .frame(width: 170)
+                        Text("\(Int(settings.backgroundOpacity * 100))%")
+                            .font(.system(.body, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .trailing)
                     }
                 }
-                .labelsHidden()
-                .frame(width: 200)
+                Toggle(locale.localized("Show in Fullscreen"), isOn: $settings.showInFullscreen)
+                Toggle(locale.localized("Block Display"), isOn: $settings.useBlockDisplay)
+            } header: {
+                SettingsSectionHeader(icon: "rectangle.inset.filled", title: locale.localized("Window"))
             }
 
-            Toggle(locale.localized("Show in Fullscreen"), isOn: $settings.showInFullscreen)
-            Toggle(locale.localized("Block Display"), isOn: $settings.useBlockDisplay)
+            Section {
+                LabeledContent(locale.localized("Font")) {
+                    Picker("", selection: $settings.fontName) {
+                        ForEach(SettingsStore.availableFonts, id: \.name) { f in
+                            Text(f.label).tag(f.name)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 200)
+                }
+                LabeledContent(locale.localized("Font Scale")) {
+                    HStack(spacing: 8) {
+                        Slider(value: $settings.fontScale, in: -5...10, step: 1)
+                            .frame(width: 170)
+                        Text("\(Int(settings.fontScale))")
+                            .font(.system(.body, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+            } header: {
+                SettingsSectionHeader(icon: "textformat", title: locale.localized("Font"))
+            }
         }
+        .formStyle(.grouped)
     }
 
-    // MARK: - Columns Tab
+    // MARK: - Columns
 
     private var columnsTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Toggle(locale.localized("Compute (CPU/GPU/PWR)"), isOn: $settings.showComputeColumn)
-            Toggle(locale.localized("Memory (MEM/PRS/SWAP)"), isOn: $settings.showMemoryColumn)
-            Toggle(locale.localized("Storage (DR/DW/THM)"),  isOn: $settings.showStorageColumn)
-            Toggle(locale.localized("Network (NET/UP/DN)"),   isOn: $settings.showNetworkColumn)
-
-            Divider()
-
-            Text(locale.localized("Menu Bar"))
-                .font(.caption).foregroundColor(.secondary)
-            Picker("", selection: $settings.statusBarMetric) {
-                Text("CPU").tag("cpu")
-                Text("GPU").tag("gpu")
-                Text("PWR").tag("pwr")
-                Text("MEM").tag("memory")
+        Form {
+            Section {
+                Toggle(locale.localized("Compute (CPU/GPU/PWR)"), isOn: $settings.showComputeColumn)
+                Toggle(locale.localized("Memory (MEM/PRS/SWAP)"), isOn: $settings.showMemoryColumn)
+                Toggle(locale.localized("Storage (DR/DW/THM)"), isOn: $settings.showStorageColumn)
+                Toggle(locale.localized("Network (NET/UP/DN)"), isOn: $settings.showNetworkColumn)
+            } header: {
+                SettingsSectionHeader(icon: "rectangle.grid.2x2", title: locale.localized("Columns"))
             }
-            .pickerStyle(.segmented)
+
+            Section {
+                Picker("", selection: $settings.statusBarMetric) {
+                    Text("CPU").tag("cpu")
+                    Text("GPU").tag("gpu")
+                    Text("PWR").tag("pwr")
+                    Text("MEM").tag("memory")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            } header: {
+                SettingsSectionHeader(icon: "menubar.rectangle", title: locale.localized("Menu Bar"))
+            }
         }
+        .formStyle(.grouped)
     }
 
-    // MARK: - General Tab
+    // MARK: - General
 
     private var generalTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(locale.localized("Refresh:"))
-                    .font(.caption)
-                Spacer()
-                Picker("", selection: $settings.refreshInterval) {
-                    Text("1s").tag(1)
-                    Text("2s").tag(2)
-                    Text("3s").tag(3)
-                    Text("5s").tag(5)
+        Form {
+            Section {
+                LabeledContent(locale.localized("Refresh")) {
+                    Picker("", selection: $settings.refreshInterval) {
+                        Text("1s").tag(1)
+                        Text("2s").tag(2)
+                        Text("3s").tag(3)
+                        Text("5s").tag(5)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 150)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 160)
+                Toggle(locale.localized("Launch at Login"), isOn: loginBinding)
+            } header: {
+                SettingsSectionHeader(icon: "gearshape", title: locale.localized("General"))
             }
 
-            Toggle(locale.localized("Launch at Login"), isOn: loginBinding)
-
-            HStack {
-                Text(locale.localized("Language:"))
-                    .font(.caption)
-                Spacer()
-                Picker("", selection: $settings.appLanguage) {
-                    Text(locale.localized("English")).tag("en")
-                    Text(locale.localized("中文")).tag("zh")
+            Section {
+                LabeledContent(locale.localized("Language")) {
+                    Picker("", selection: $settings.appLanguage) {
+                        Text(locale.localized("English")).tag("en")
+                        Text(locale.localized("中文")).tag("zh")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 160)
+            } header: {
+                SettingsSectionHeader(icon: "globe", title: locale.localized("Language"))
+            }
+
+            Section {
+                Button {
+                    settings.resetToDefaults()
+                } label: {
+                    Label(locale.localized("Restore Defaults"), systemImage: "arrow.counterclockwise")
+                }
+            } header: {
+                SettingsSectionHeader(icon: "arrow.counterclockwise", title: locale.localized("Reset"))
+            }
+
+            Section {
+                Text(locale.localized("Settings apply immediately"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .formStyle(.grouped)
     }
 
     private var loginBinding: Binding<Bool> {
@@ -169,5 +203,27 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+}
+
+// MARK: - Section Header
+
+/// Grouped-section header in the macOS 26 System Settings style: a small
+/// tinted icon chip beside a semibold label.
+private struct SettingsSectionHeader: View {
+    let icon: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tint)
+                .frame(width: 20, height: 20)
+                .background(.tint.opacity(0.12), in: .rect(cornerRadius: 6))
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+        }
+        .foregroundStyle(.secondary)
     }
 }

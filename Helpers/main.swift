@@ -17,8 +17,8 @@ guard IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0) == 
 else { print("0"); exit(0) }
 
 if let tele = dict["PowerTelemetryData"] as? [String: Any],
-   let load = tele["SystemLoad"] as? Int {
-    print(load)
+   let load = tele["SystemLoad"] as? NSNumber {
+    print(load.intValue)
 } else {
     print("0")
 }

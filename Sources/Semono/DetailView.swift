@@ -1,55 +1,97 @@
 import SwiftUI
+import Charts
 
-enum DetailPage: String, CaseIterable, Identifiable {
+enum DetailPage: String, CaseIterable, Hashable, Identifiable {
     case cpu, gpu, memory, storage, network, other
+
     var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .cpu: "cpu"
+        case .gpu: "square.3.layers.3d"
+        case .memory: "memorychip"
+        case .storage: "internaldrive"
+        case .network: "network"
+        case .other: "thermometer.medium"
+        }
+    }
+
+    var titleKey: String {
+        switch self {
+        case .cpu: "CPU"
+        case .gpu: "GPU"
+        case .memory: "Memory"
+        case .storage: "Storage"
+        case .network: "Network"
+        case .other: "Other"
+        }
+    }
 }
 
-final class DetailViewState: ObservableObject {
-    @Published var selectedPage: DetailPage = .cpu
-}
-
+/// Monitoring window on the macOS 26/27 design language.
+///
+/// Liquid Glass belongs to the navigation layer only: the sidebar and
+/// toolbar are system glass. Scrolling content stays on quiet system
+/// fills — never glass on glass.
 struct DetailView: View {
     @ObservedObject var history = MetricsHistory.shared
-    @ObservedObject var metrics: MetricsCollector
+    let metrics: MetricsCollector
+    @ObservedObject var settings = SettingsStore.shared
     @ObservedObject var locale = LocaleManager.shared
-    @ObservedObject private var state = DetailViewState()
+    @State private var selectedPage: DetailPage = .cpu
 
     init(metrics: MetricsCollector) {
         self.metrics = metrics
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $state.selectedPage) {
-                Text(locale.localized("CPU")).tag(DetailPage.cpu)
-                Text(locale.localized("GPU")).tag(DetailPage.gpu)
-                Text(locale.localized("Memory")).tag(DetailPage.memory)
-                Text(locale.localized("Storage")).tag(DetailPage.storage)
-                Text(locale.localized("Network")).tag(DetailPage.network)
-                Text(locale.localized("Other")).tag(DetailPage.other)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
-
-            Divider()
-                .padding(.horizontal, 10)
-
-            ScrollView(.vertical) {
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            ScrollView {
                 pageContent
-                    .padding(12)
+                    .id(selectedPage)
+                    .transition(.opacity.combined(with: .offset(y: 8)))
+                    .padding(16)
+            }
+            .scrollIndicators(.hidden)
+            .animation(.snappy(duration: 0.3), value: selectedPage)
+        }
+        .navigationTitle(locale.localized(selectedPage.titleKey))
+        .tint(ColorScale.accent)
+        .toolbar(removing: .sidebarToggle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Picker("", selection: $settings.refreshInterval) {
+                    Text("1s").tag(1)
+                    Text("2s").tag(2)
+                    Text("3s").tag(3)
+                    Text("5s").tag(5)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .help(locale.localized("Refresh:"))
             }
         }
-        .background(Color.black.opacity(0.92))
-        .preferredColorScheme(.dark)
     }
+
+    private var sidebar: some View {
+        List(selection: $selectedPage) {
+            ForEach(DetailPage.allCases) { page in
+                Label(locale.localized(page.titleKey), systemImage: page.icon)
+                    .tag(page)
+            }
+        }
+        .listStyle(.sidebar)
+        .navigationSplitViewColumnWidth(min: 165, ideal: 190, max: 240)
+    }
+
+    // MARK: - Pages
 
     @ViewBuilder
     private var pageContent: some View {
-        switch state.selectedPage {
+        switch selectedPage {
         case .cpu:    cpuPage
         case .gpu:    gpuPage
         case .memory: memoryPage
@@ -59,67 +101,50 @@ struct DetailView: View {
         }
     }
 
-    // MARK: - CPU Page
-
+    /// CPU: hero overview + per-core usage and frequency grids.
     private var cpuPage: some View {
-        VStack(spacing: 10) {
-            let usagePoints = history.snapshots.map {
-                ChartPoint(value: $0.cpuUsage, color: ColorScale.color(for: $0.cpuUsage))
-            }
-            RichChart(
+        VStack(alignment: .leading, spacing: 14) {
+            PageHero(
+                icon: "cpu",
                 title: locale.localized("CPU Usage"),
-                unit: "%",
-                points: usagePoints,
+                unit: "",
+                values: history.snapshots.map(\.cpuUsage),
                 maxY: 1.0,
-                rawValues: history.snapshots.map { String(format: "%.0f", $0.cpuUsage * 100) }
+                format: { String(format: "%.0f%%", $0 * 100) }
             )
 
             if let last = history.snapshots.last, !last.perCoreCPU.isEmpty {
+                SectionHeader(locale.localized("Per Core"))
                 AdaptiveGrid {
                     ForEach(0..<last.perCoreCPU.count, id: \.self) { i in
-                        let pts = history.snapshots.map { s -> ChartPoint in
-                            let v = s.perCoreCPU.count > i ? s.perCoreCPU[i] : 0
-                            return ChartPoint(value: v, color: ColorScale.color(for: v))
-                        }
-                        let rawVals = history.snapshots.map { s -> String in
-                            let v = s.perCoreCPU.count > i ? s.perCoreCPU[i] : 0
-                            return String(format: "%.0f", v * 100)
-                        }
-                        RichChart(
+                        MetricChart(
                             title: "CPU \(i)",
-                            unit: "%",
-                            points: pts,
+                            icon: nil,
+                            unit: "",
+                            values: history.snapshots.map { s in
+                                s.perCoreCPU.count > i ? s.perCoreCPU[i] : 0
+                            },
                             maxY: 1.0,
-                            rawValues: rawVals,
-                            small: true
+                            format: { String(format: "%.0f%%", $0 * 100) },
+                            compact: true
                         )
                     }
                 }
             }
 
             if let last = history.snapshots.last, !last.perCoreFreqMHz.isEmpty {
-                SectionLabel(locale.localized("Frequency") + " (MHz)")
+                SectionHeader(locale.localized("Frequency") + " (MHz)")
                 AdaptiveGrid {
                     ForEach(0..<last.perCoreFreqMHz.count, id: \.self) { i in
-                        let maxFreq = history.snapshots.compactMap { s in
-                            s.perCoreFreqMHz.count > i ? s.perCoreFreqMHz[i] : nil
-                        }.max() ?? 4000
-                        let cap = max(maxFreq, 1000)
-                        let pts = history.snapshots.map { s -> ChartPoint in
-                            let v = s.perCoreFreqMHz.count > i ? s.perCoreFreqMHz[i] : 0
-                            return ChartPoint(value: v / cap, color: freqColor(v))
-                        }
-                        let rawVals = history.snapshots.map { s -> String in
-                            let v = s.perCoreFreqMHz.count > i ? s.perCoreFreqMHz[i] : 0
-                            return String(format: "%.0f", v)
-                        }
-                        RichChart(
+                        MetricChart(
                             title: "Freq \(i)",
+                            icon: nil,
                             unit: "MHz",
-                            points: pts,
-                            maxY: 1.0,
-                            rawValues: rawVals,
-                            small: true
+                            values: history.snapshots.map { s in
+                                s.perCoreFreqMHz.count > i ? s.perCoreFreqMHz[i] : 0
+                            },
+                            format: { String(format: "%.0f", $0) },
+                            compact: true
                         )
                     }
                 }
@@ -127,184 +152,150 @@ struct DetailView: View {
         }
     }
 
-    // MARK: - GPU Page
-
+    /// GPU: hero overview.
     private var gpuPage: some View {
-        VStack(spacing: 10) {
-            let usagePoints = history.snapshots.map {
-                ChartPoint(value: $0.gpuUsage, color: ColorScale.color(for: $0.gpuUsage))
-            }
-            RichChart(
-                title: locale.localized("GPU Usage"),
-                unit: "%",
-                points: usagePoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { String(format: "%.0f", $0.gpuUsage * 100) }
-            )
-        }
+        PageHero(
+            icon: "square.3.layers.3d",
+            title: locale.localized("GPU Usage"),
+            unit: "",
+            values: history.snapshots.map(\.gpuUsage),
+            maxY: 1.0,
+            format: { String(format: "%.0f%%", $0 * 100) }
+        )
     }
 
-    // MARK: - Memory Page
-
+    /// Memory: hero overview + swap and pressure detail.
     private var memoryPage: some View {
-        VStack(spacing: 10) {
-            let memPoints = history.snapshots.map {
-                ChartPoint(value: $0.memoryUsage, color: ColorScale.color(for: $0.memoryUsage))
-            }
-            RichChart(
+        VStack(alignment: .leading, spacing: 14) {
+            PageHero(
+                icon: "memorychip",
                 title: locale.localized("Memory Usage"),
-                unit: "%",
-                points: memPoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { String(format: "%.0f", $0.memoryUsage * 100) }
-            )
-
-            let swapPoints = history.snapshots.map {
-                ChartPoint(value: $0.swapRatio, color: ColorScale.color(for: $0.swapRatio))
-            }
-            RichChart(
-                title: locale.localized("Swap Usage"),
-                unit: "GB",
-                points: swapPoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { fmtBytesSmall($0.swapBytes) },
-                rawValueHasUnit: true
-            )
-
-            let presPoints = history.snapshots.map {
-                ChartPoint(value: Double($0.memoryPressureLevel + 1) / 4.0,
-                           color: ColorScale.color(forLevel: $0.memoryPressureLevel))
-            }
-            RichChart(
-                title: locale.localized("Memory Pressure"),
                 unit: "",
-                points: presPoints,
+                values: history.snapshots.map(\.memoryUsage),
                 maxY: 1.0,
-                rawValues: history.snapshots.map { ["N", "M", "H", "C"][$0.memoryPressureLevel] }
+                format: { String(format: "%.0f%%", $0 * 100) }
             )
+
+            AdaptiveGrid {
+                MetricChart(
+                    title: locale.localized("Swap Usage"),
+                    icon: "arrow.triangle.2.circlepath",
+                    unit: "",
+                    values: history.snapshots.map { Double($0.swapBytes) },
+                    format: fmtBytesSmall,
+                    latestText: history.snapshots.last.map { fmtBytesSmall(Double($0.swapBytes)) }
+                )
+
+                MetricChart(
+                    title: locale.localized("Memory Pressure"),
+                    icon: "gauge",
+                    unit: "",
+                    values: history.snapshots.map { Double(clampLevel($0.memoryPressureLevel) + 1) / 4.0 },
+                    maxY: 1.0,
+                    format: { _ in "" },
+                    latestText: history.snapshots.last.map {
+                        ["N", "M", "H", "C"][clampLevel($0.memoryPressureLevel)]
+                    },
+                    showStats: false
+                )
+            }
         }
     }
 
-    // MARK: - Storage Page
-
+    /// Storage: read / write throughput.
     private var storagePage: some View {
-        VStack(spacing: 10) {
-            let readPoints = history.snapshots.map {
-                ChartPoint(value: normSpeed($0.diskReadSpeed, cap: 500_000_000),
-                           color: .green)
-            }
-            RichChart(
+        AdaptiveGrid {
+            MetricChart(
                 title: locale.localized("Disk Read"),
-                unit: "MB/s",
-                points: readPoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { fmtSpeedShort($0.diskReadSpeed) },
-                rawValueHasUnit: true
+                icon: "arrow.down",
+                unit: "",
+                values: history.snapshots.map(\.diskReadSpeed),
+                format: fmtSpeedShort
             )
-
-            let writePoints = history.snapshots.map {
-                ChartPoint(value: normSpeed($0.diskWriteSpeed, cap: 500_000_000),
-                           color: .orange)
-            }
-            RichChart(
+            MetricChart(
                 title: locale.localized("Disk Write"),
-                unit: "MB/s",
-                points: writePoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { fmtSpeedShort($0.diskWriteSpeed) },
-                rawValueHasUnit: true
+                icon: "arrow.up",
+                unit: "",
+                values: history.snapshots.map(\.diskWriteSpeed),
+                format: fmtSpeedShort
             )
         }
     }
 
-    // MARK: - Network Page
-
+    /// Network: down / up throughput and Wi-Fi signal.
     private var networkPage: some View {
-        VStack(spacing: 10) {
-            let downPoints = history.snapshots.map {
-                ChartPoint(value: normSpeed($0.downloadSpeed, cap: 125_000_000),
-                           color: Color(red: 0.70, green: 0.55, blue: 0.92))
-            }
-            RichChart(
+        AdaptiveGrid {
+            MetricChart(
                 title: locale.localized("Network Down"),
-                unit: "MB/s",
-                points: downPoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { fmtSpeedShort($0.downloadSpeed) },
-                rawValueHasUnit: true
+                icon: "arrow.down",
+                unit: "",
+                values: history.snapshots.map(\.downloadSpeed),
+                format: fmtSpeedShort
             )
-
-            let upPoints = history.snapshots.map {
-                ChartPoint(value: normSpeed($0.uploadSpeed, cap: 125_000_000),
-                           color: Color(red: 0.70, green: 0.55, blue: 0.92))
-            }
-            RichChart(
+            MetricChart(
                 title: locale.localized("Network Up"),
-                unit: "MB/s",
-                points: upPoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { fmtSpeedShort($0.uploadSpeed) },
-                rawValueHasUnit: true
+                icon: "arrow.up",
+                unit: "",
+                values: history.snapshots.map(\.uploadSpeed),
+                format: fmtSpeedShort
             )
-
-            let rssiPoints = history.snapshots.map {
-                let v = Double(max(0, min(60, 60 + ($0.wifiRSSI == 0 ? -60 : $0.wifiRSSI)))) / 60.0
-                return ChartPoint(value: v, color: ColorScale.color(forRSSI: $0.wifiRSSI))
-            }
-            RichChart(
+            MetricChart(
                 title: locale.localized("WiFi RSSI"),
+                icon: "wifi",
                 unit: "dBm",
-                points: rssiPoints,
+                values: history.snapshots.map { rssiNorm($0.wifiRSSI) },
                 maxY: 1.0,
-                rawValues: history.snapshots.map { $0.wifiRSSI == 0 ? "-" : String($0.wifiRSSI) }
+                format: { _ in "" },
+                latestText: history.snapshots.last.map { $0.wifiRSSI == 0 ? "\u{2014}" : "\($0.wifiRSSI)" },
+                showStats: false
             )
         }
     }
 
-    // MARK: - Other Page
-
+    /// Other: thermal state hero + power draw detail.
     private var otherPage: some View {
-        VStack(spacing: 10) {
-            let thermalPoints = history.snapshots.map {
-                ChartPoint(value: Double($0.thermalState + 1) / 4.0,
-                           color: ColorScale.color(forLevel: $0.thermalState))
-            }
-            RichChart(
+        VStack(alignment: .leading, spacing: 14) {
+            PageHero(
+                icon: "thermometer.medium",
                 title: locale.localized("Thermal State"),
                 unit: "",
-                points: thermalPoints,
+                values: history.snapshots.map { Double(clampLevel($0.thermalState) + 1) / 4.0 },
                 maxY: 1.0,
-                rawValues: history.snapshots.map {
+                format: { _ in "" },
+                latestText: history.snapshots.last.map {
                     [locale.localized("Nominal"), locale.localized("Moderate"),
-                     locale.localized("Heavy"), locale.localized("Critical")][$0.thermalState]
-                }
+                     locale.localized("Heavy"), locale.localized("Critical")][clampLevel($0.thermalState)]
+                },
+                showStats: false
             )
 
-            let powerPoints = history.snapshots.map {
-                ChartPoint(value: min($0.powerUsage / 60.0, 1.0), color: .orange)
+            AdaptiveGrid {
+                MetricChart(
+                    title: locale.localized("Power Draw"),
+                    icon: "bolt.fill",
+                    unit: "W",
+                    values: history.snapshots.map(\.powerUsage),
+                    format: { String(format: "%.1f", $0) }
+                )
             }
-            RichChart(
-                title: locale.localized("Power Draw"),
-                unit: "W",
-                points: powerPoints,
-                maxY: 1.0,
-                rawValues: history.snapshots.map { String(format: "%.1f", $0.powerUsage) }
-            )
         }
     }
 
     // MARK: - Helpers
 
-    private func normSpeed(_ speed: Double, cap: Double) -> Double {
-        guard speed > 0 else { return 0 }
-        return min(1.0, speed / cap)
+    private func clampLevel(_ level: Int) -> Int {
+        min(3, max(0, level))
     }
 
-    private func fmtBytesSmall(_ bytes: UInt64) -> String {
+    private func rssiNorm(_ rssi: Int) -> Double {
+        rssi == 0 ? 0 : Double(max(30, min(90, abs(rssi))) - 30) / 60.0
+    }
+
+    private func fmtBytesSmall(_ bytes: Double) -> String {
         if bytes >= 1_000_000_000 {
-            return String(format: "%.1fG", Double(bytes) / 1_000_000_000)
+            return String(format: "%.1fG", bytes / 1_000_000_000)
         } else {
-            return String(format: "%.0fM", Double(bytes) / 1_000_000)
+            return String(format: "%.0fM", bytes / 1_000_000)
         }
     }
 
@@ -318,164 +309,269 @@ struct DetailView: View {
             return String(format: "%.0fB", bytesPerSec)
         }
     }
-
-    private func freqColor(_ mhz: Double) -> Color {
-        if mhz < 500  { return .gray }
-        if mhz < 1500 { return .blue }
-        if mhz < 2500 { return .green }
-        if mhz < 3500 { return .orange }
-        return .red
-    }
 }
 
-// MARK: - Chart Point
+// MARK: - Section Header
 
-struct ChartPoint {
-    let value: Double
-    let color: Color
-}
-
-// MARK: - Section Label
-
-struct SectionLabel: View {
+/// Quiet section divider for scrolling content.
+struct SectionHeader: View {
     let text: String
+
     init(_ text: String) { self.text = text }
 
     var body: some View {
         Text(text)
-            .font(.custom("DepartureMono-Regular", size: 10))
-            .foregroundColor(.white.opacity(0.4))
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 4)
+            .padding(.top, 2)
     }
 }
 
-// MARK: - Rich Chart
+// MARK: - Page Hero
 
-struct RichChart: View {
+/// Large overview card for a page's primary metric: icon chip, big live
+/// value, history sparkline, AVG/MAX. Content-layer fill — no glass in
+/// scrolling content.
+struct PageHero: View {
+    let icon: String
     let title: String
     let unit: String
-    let points: [ChartPoint]
-    let maxY: Double
-    var rawValues: [String]?
-    var small: Bool = false
-    var rawValueHasUnit: Bool = false
+    let values: [Double]
+    var maxY: Double? = nil
+    var format: (Double) -> String = { String(format: "%.1f", $0) }
+    var latestText: String? = nil
+    var showStats: Bool = true
 
-    private var chartHeight: CGFloat { small ? 88 : 144 }
-    private var labelSize: CGFloat { small ? 9 : 11 }
-    private var gridLines: Int { small ? 2 : 4 }
+    private var effectiveMax: Double {
+        if let maxY { return max(maxY, 0.001) }
+        let peak = values.max() ?? 0
+        return max(peak * 1.08, 0.001)
+    }
+
+    private var normPoints: [Double] {
+        values.map { min(1.0, max(0, $0 / effectiveMax)) }
+    }
+
+    private var latestColor: Color {
+        guard let last = values.last else { return .secondary }
+        return ColorScale.color(for: min(1.0, max(0, last / effectiveMax)))
+    }
+
+    private var avg: Double {
+        values.reduce(0, +) / Double(values.count)
+    }
+
+    private var peak: Double {
+        values.max() ?? 0
+    }
 
     var body: some View {
-        VStack(spacing: 3) {
-            HStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 26, height: 26)
+                    .background(.tint.opacity(0.14), in: .rect(cornerRadius: 7))
                 Text(title)
-                    .font(.custom("DepartureMono-Regular", size: labelSize))
-                    .foregroundColor(.white.opacity(0.5))
-                    .lineLimit(1)
+                    .font(.headline)
                 Spacer(minLength: 4)
-                if let values = rawValues, let last = values.last {
-                    Text(last)
-                        .font(.custom("DepartureMono-Regular", size: labelSize))
-                        .foregroundColor(points.last?.color ?? .white)
-                        .monospacedDigit()
-                    if !rawValueHasUnit, !unit.isEmpty {
-                        Text(" " + unit)
-                            .font(.custom("DepartureMono-Regular", size: labelSize))
-                            .foregroundColor(.white.opacity(0.3))
-                    }
-                } else if let last = points.last {
-                    Text(String(format: "%.0f", last.value * maxY))
-                        .font(.custom("DepartureMono-Regular", size: labelSize))
-                        .foregroundColor(last.color)
-                        .monospacedDigit()
-                    if !unit.isEmpty {
-                        Text(" " + unit)
-                            .font(.custom("DepartureMono-Regular", size: labelSize))
-                            .foregroundColor(.white.opacity(0.3))
-                    }
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(latestText ?? (values.last.map(format) ?? "\u{2014}"))
+                    .font(.system(size: 40, weight: .semibold, design: .rounded))
+                    .foregroundStyle(latestColor)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.35), value: values.last)
+                if !unit.isEmpty {
+                    Text(unit)
+                        .font(.title3)
+                        .foregroundStyle(.tertiary)
                 }
             }
 
-            GeometryReader { geo in
-                let w = geo.size.width
-                let h = geo.size.height
-
-                ZStack(alignment: .topLeading) {
-                    gridBackground(w: w, h: h)
-
-                    if points.count > 1 {
-                        segmentFill(w: w, h: h)
-                        segmentLines(w: w, h: h)
-                    }
-                }
+            if normPoints.count > 1 {
+                Sparkline(values: normPoints, color: latestColor, height: 84)
+            } else {
+                Color.clear.frame(height: 84)
             }
-            .frame(height: chartHeight)
+
+            if showStats && values.count > 1 {
+                stats
+            }
         }
-        .padding(7)
-        .background(Color.white.opacity(0.05))
-        .overlay(Rectangle().stroke(Color.white.opacity(0.07), lineWidth: 0.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.fill.quaternary)
+        )
     }
 
-    private func gridBackground(w: CGFloat, h: CGFloat) -> some View {
-        Canvas { context, _ in
-            for i in 1...gridLines {
-                let y = h * CGFloat(i) / CGFloat(gridLines + 1)
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: w, y: y))
-                context.stroke(path, with: .color(.white.opacity(0.05)), lineWidth: 0.5)
-            }
+    private var stats: some View {
+        HStack(spacing: 0) {
+            Text("AVG \(format(avg))")
+            Text("  \u{00B7}  MAX \(format(peak))")
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.tertiary)
+    }
+}
 
-            let vLines = min(6, max(2, points.count / 6))
-            for i in 1...vLines {
-                let x = w * CGFloat(i) / CGFloat(vLines + 1)
-                var path = Path()
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: h))
-                context.stroke(path, with: .color(.white.opacity(0.03)), lineWidth: 0.5)
+// MARK: - Metric Chart
+
+/// A single-metric card: icon + title, live value, sparkline, AVG/MAX stats.
+/// Values are raw; the chart auto-scales to `maxY` (or to the data peak).
+/// Cards use a quiet system fill — the Liquid Glass layer belongs to the
+/// window chrome (sidebar/toolbar), not to scrolling content.
+struct MetricChart: View {
+    let title: String
+    let icon: String?
+    let unit: String
+    let values: [Double]
+    var maxY: Double? = nil
+    var format: (Double) -> String = { String(format: "%.1f", $0) }
+    var latestText: String? = nil
+    var showStats: Bool = true
+    var compact: Bool = false
+
+    private var effectiveMax: Double {
+        if let maxY { return max(maxY, 0.001) }
+        let peak = values.max() ?? 0
+        return max(peak * 1.08, 0.001)
+    }
+
+    private var normPoints: [Double] {
+        values.map { min(1.0, max(0, $0 / effectiveMax)) }
+    }
+
+    private var latestColor: Color {
+        guard let last = values.last else { return .secondary }
+        return ColorScale.color(for: min(1.0, max(0, last / effectiveMax)))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 6 : 10) {
+            header
+            if normPoints.count > 1 {
+                Sparkline(
+                    values: normPoints,
+                    color: latestColor,
+                    height: compact ? 48 : 84,
+                    lineWidth: compact ? 1.5 : 2
+                )
+            } else {
+                Color.clear.frame(height: compact ? 48 : 84)
+            }
+            if showStats && !compact && values.count > 1 {
+                stats
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(compact ? 12 : 14)
+        .background(
+            RoundedRectangle(cornerRadius: compact ? 10 : 12, style: .continuous)
+                .fill(.fill.quaternary)
+        )
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tint)
+            }
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            if let latestText {
+                Text(latestText)
+                    .font(compact ? .caption.monospaced().weight(.semibold) : .callout.monospaced().weight(.semibold))
+                    .foregroundStyle(latestColor)
+                    .lineLimit(1)
+            } else if let last = values.last {
+                Text(format(last))
+                    .font(
+                        compact
+                            ? .system(.subheadline, design: .rounded).weight(.semibold)
+                            : .system(.title3, design: .rounded).weight(.semibold)
+                    )
+                    .foregroundStyle(latestColor)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.35), value: last)
+            }
+            if !unit.isEmpty {
+                Text(unit)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
     }
 
-    private func segmentFill(w: CGFloat, h: CGFloat) -> some View {
-        Canvas { context, _ in
-            let stepX = w / CGFloat(max(points.count - 1, 1))
-
-            for i in 0..<(points.count - 1) {
-                let x0 = stepX * CGFloat(i)
-                let x1 = stepX * CGFloat(i + 1)
-                let y0 = h * CGFloat(1.0 - min(max(0, points[i].value), maxY) / maxY)
-                let y1 = h * CGFloat(1.0 - min(max(0, points[i + 1].value), maxY) / maxY)
-
-                var fillPath = Path()
-                fillPath.move(to: CGPoint(x: x0, y: y0))
-                fillPath.addLine(to: CGPoint(x: x1, y: y1))
-                fillPath.addLine(to: CGPoint(x: x1, y: h))
-                fillPath.addLine(to: CGPoint(x: x0, y: h))
-                fillPath.closeSubpath()
-
-                context.fill(fillPath, with: .color(points[i].color.opacity(0.15)))
-            }
+    private var stats: some View {
+        HStack(spacing: 0) {
+            Text("AVG \(format(avg))")
+            Text("  \u{00B7}  MAX \(format(peak))")
         }
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+        .monospacedDigit()
     }
 
-    private func segmentLines(w: CGFloat, h: CGFloat) -> some View {
-        Canvas { context, _ in
-            let stepX = w / CGFloat(max(points.count - 1, 1))
+    private var avg: Double {
+        values.reduce(0, +) / Double(values.count)
+    }
 
-            for i in 0..<(points.count - 1) {
-                let x0 = stepX * CGFloat(i)
-                let x1 = stepX * CGFloat(i + 1)
-                let y0 = h * CGFloat(1.0 - min(max(0, points[i].value), maxY) / maxY)
-                let y1 = h * CGFloat(1.0 - min(max(0, points[i + 1].value), maxY) / maxY)
+    private var peak: Double {
+        values.max() ?? 0
+    }
+}
 
-                var linePath = Path()
-                linePath.move(to: CGPoint(x: x0, y: y0))
-                linePath.addLine(to: CGPoint(x: x1, y: y1))
+// MARK: - Sparkline
 
-                context.stroke(linePath, with: .color(points[i].color), lineWidth: small ? 1.0 : 1.5)
+private struct Sparkline: View {
+    let values: [Double]
+    let color: Color
+    let height: CGFloat
+    var lineWidth: CGFloat = 2
+
+    var body: some View {
+        Chart {
+            ForEach(Array(values.enumerated()), id: \.offset) { idx, v in
+                AreaMark(
+                    x: .value("Index", idx),
+                    y: .value("Value", v)
+                )
+                .interpolationMethod(.monotone)
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [color.opacity(0.28), color.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                LineMark(
+                    x: .value("Index", idx),
+                    y: .value("Value", v)
+                )
+                .interpolationMethod(.monotone)
+                .foregroundStyle(color)
+                .lineStyle(StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
             }
         }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .chartYScale(domain: 0...1)
+        .frame(height: height)
     }
 }
 
@@ -485,8 +581,10 @@ struct AdaptiveGrid<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        let items = [GridItem](repeating: GridItem(.flexible(), spacing: 6), count: 3)
-        LazyVGrid(columns: items, spacing: 6) {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 280), spacing: 12)],
+            spacing: 12
+        ) {
             content()
         }
     }

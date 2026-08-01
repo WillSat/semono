@@ -44,7 +44,7 @@ final class MetricsCollector: ObservableObject {
     func start() {
         updateTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                self?.sample()
+                await self?.sample()
                 let interval = Double(SettingsStore.shared.refreshInterval)
                 try? await Task.sleep(for: .seconds(interval))
             }
@@ -56,7 +56,7 @@ final class MetricsCollector: ObservableObject {
         updateTask = nil
     }
 
-    private func sample() {
+    private func sample() async {
         let s = SettingsStore.shared
         let sb = s.statusBarMetric
         let collectGPU = s.showComputeColumn || sb == "gpu"
@@ -67,7 +67,7 @@ final class MetricsCollector: ObservableObject {
         let collectNetwork = s.showNetworkColumn
 
         if collectGPU {
-            gpuUsage = Self.readGPU()
+            gpuUsage = await Self.readGPU()
         }
         if collectCPU {
             (cpuUsage, perCoreCPU) = readCPU()
@@ -79,10 +79,10 @@ final class MetricsCollector: ObservableObject {
             (memoryPressureLevel, swapBytes, swapRatio) = readSwapAndPressure()
         }
 
-        if collectStorage { thermalState = readThermalState() }
+        thermalState = readThermalState()
 
         if collectPower {
-            if sampleCount % 2 == 0 { cachedPower = Self.readPower() }
+            if sampleCount % 2 == 0 { cachedPower = await Self.readPower() }
             powerUsage = cachedPower
         }
 
@@ -96,16 +96,14 @@ final class MetricsCollector: ObservableObject {
         }
 
         if collectStorage {
-            let (diskR, diskW) = readDisk()
+            let (diskR, diskW) = await readDisk()
             diskReadSpeed = diskR
             diskWriteSpeed = diskW
         }
 
         sampleCount &+= 1
 
-        Task { @MainActor in
-            MetricsHistory.shared.record(from: self)
-        }
+        MetricsHistory.shared.record(from: self)
     }
 
     // MARK: - CPU
@@ -159,11 +157,9 @@ final class MetricsCollector: ObservableObject {
 
         var aggregate: Double = 0
         if prevCpuTotal > 0, total > prevCpuTotal {
-            let usedDelta = used - prevCpuUsed
+            let usedDelta = used >= prevCpuUsed ? used - prevCpuUsed : 0
             let totalDelta = total - prevCpuTotal
-            if totalDelta > 0 {
-                aggregate = min(1.0, Double(usedDelta) / Double(totalDelta))
-            }
+            aggregate = min(1.0, Double(usedDelta) / Double(totalDelta))
         }
         prevCpuUsed = used
         prevCpuTotal = total
@@ -171,9 +167,10 @@ final class MetricsCollector: ObservableObject {
         var perCore: [Double] = Array(repeating: 0, count: cpuCount)
         if prevPerCoreUsed.count == cpuCount {
             for i in 0..<cpuCount {
-                guard perCoreNowTotal[i] > prevPerCoreTotal[i],
-                      perCoreNowTotal[i] >= prevPerCoreTotal[i] else { continue }
-                let uDelta = perCoreNowUsed[i] - prevPerCoreUsed[i]
+                guard perCoreNowTotal[i] > prevPerCoreTotal[i] else { continue }
+                let uDelta = perCoreNowUsed[i] >= prevPerCoreUsed[i]
+                    ? perCoreNowUsed[i] - prevPerCoreUsed[i]
+                    : 0
                 let tDelta = perCoreNowTotal[i] - prevPerCoreTotal[i]
                 if tDelta > 0 {
                     perCore[i] = min(1.0, Double(uDelta) / Double(tDelta))
@@ -225,7 +222,7 @@ final class MetricsCollector: ObservableObject {
 
         var buf = [CChar](repeating: 0, count: swapSize)
         sysctlbyname("vm.swapusage", &buf, &swapSize, nil, 0)
-        let str = String(cString: buf)
+        let str = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 
         let usedBytes = parseSwapField(str, key: "used")
         let totalBytes = parseSwapField(str, key: "total")
@@ -259,40 +256,22 @@ final class MetricsCollector: ObservableObject {
 
     // MARK: - GPU
 
-    nonisolated private static func readGPU() -> Double {
-        let helperURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/gpu_helper")
-        let task = Process()
-        task.executableURL = helperURL
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        guard let _ = try? task.run() else { return 0 }
-        task.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+    nonisolated private static func readGPU() async -> Double {
+        let raw = await runHelper("gpu_helper")
         return min(1.0, (Double(raw) ?? 0) / 100.0)
     }
 
     // MARK: - Power
 
-    nonisolated private static func readPower() -> Double {
-        let helperURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/power_helper")
-        let task = Process()
-        task.executableURL = helperURL
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        guard let _ = try? task.run() else { return 0 }
-        task.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+    nonisolated private static func readPower() async -> Double {
+        let raw = await runHelper("power_helper")
         return (Double(raw) ?? 0) / 1000.0
     }
 
     // MARK: - Disk
 
-    private func readDisk() -> (Double, Double) {
-        guard let (r, w) = Self.readDiskBytes() else {
+    private func readDisk() async -> (Double, Double) {
+        guard let (r, w) = await Self.readDiskBytes() else {
             return (0, 0)
         }
         let now = Date()
@@ -317,22 +296,32 @@ final class MetricsCollector: ObservableObject {
         return (readSpeed, writeSpeed)
     }
 
-    nonisolated private static func readDiskBytes() -> (UInt64, UInt64)? {
-        let helperURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/disk_helper")
-        let task = Process()
-        task.executableURL = helperURL
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        guard let _ = try? task.run() else { return nil }
-        task.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    nonisolated private static func readDiskBytes() async -> (UInt64, UInt64)? {
+        let raw = await runHelper("disk_helper")
         let parts = raw.split(separator: " ")
         guard parts.count == 2,
               let r = UInt64(parts[0]),
               let w = UInt64(parts[1]) else { return nil }
         return (r, w)
+    }
+
+    /// Runs a bundled helper binary off the main thread with a timeout.
+    /// A hung helper no longer blocks the UI; it is terminated and reported as "0".
+    nonisolated private static func runHelper(_ name: String, timeout: TimeInterval = 2.0) async -> String {
+        let helper = HelperProcess(name: name)
+        return await withTaskGroup(of: String.self) { group in
+            group.addTask {
+                helper.runAndRead()
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeout))
+                helper.task.terminate()
+                return ""
+            }
+            guard let first = await group.next() else { return "" }
+            group.cancelAll()
+            return first
+        }
     }
 
     // MARK: - Network Bytes
@@ -409,13 +398,13 @@ final class MetricsCollector: ObservableObject {
         while entry != 0 {
             if let props = IORegistryEntryCreateCFProperty(entry, "cpu-frequency" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() {
                 var freq: UInt64 = 0
-                if CFGetTypeID(props) == CFNumberGetTypeID() {
-                    CFNumberGetValue(props as! CFNumber, .sInt64Type, &freq)
-                } else if CFGetTypeID(props) == CFDataGetTypeID() {
-                    let data = props as! CFData
-                    if CFDataGetLength(data) >= 8 {
-                        CFDataGetBytes(data, CFRange(location: 0, length: 8), &freq)
-                    }
+                switch props {
+                case let number as CFNumber:
+                    CFNumberGetValue(number, .sInt64Type, &freq)
+                case let data as CFData where CFDataGetLength(data) >= 8:
+                    CFDataGetBytes(data, CFRange(location: 0, length: 8), &freq)
+                default:
+                    break
                 }
                 freqs.append(Double(freq) / 1_000_000.0)
             }
@@ -452,6 +441,32 @@ final class MetricsCollector: ObservableObject {
     private static let kCPUStateSystem = Int32(1)
     private static let kCPUStateIdle   = Int32(2)
     private static let kCPUStateNice   = Int32(3)
+}
+
+// Wraps Process/Pipe so the helper can be run off the main actor.
+// Access is confined: runAndRead() runs on one worker thread, terminate() is
+// documented thread-safe, so @unchecked Sendable is acceptable here.
+private final class HelperProcess: @unchecked Sendable {
+    let task: Process
+    private let pipe: Pipe
+
+    init(name: String) {
+        let task = Process()
+        task.executableURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/\(name)")
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        self.task = task
+        self.pipe = pipe
+    }
+
+    func runAndRead() -> String {
+        guard (try? task.run()) != nil else { return "" }
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
 }
 
 private typealias processor_info_array_t = UnsafeMutablePointer<integer_t>

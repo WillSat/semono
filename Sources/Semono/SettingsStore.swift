@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 
 @MainActor
 final class SettingsStore: ObservableObject {
@@ -11,6 +12,7 @@ final class SettingsStore: ObservableObject {
     @AppStorage("hudY") var hudY: Double = -1
     @AppStorage("hudWidth") var hudWidth: Double = -1
     @AppStorage("hudHeight") var hudHeight: Double = -1
+    @AppStorage("hudHasSavedPosition") var hudHasSavedPosition = false
     @AppStorage("showInFullscreen") var showInFullscreen = true
     @AppStorage("fontName") var fontName = "DepartureMono-Regular"
     @AppStorage("fontScale") var fontScale: Double = 0
@@ -39,4 +41,28 @@ final class SettingsStore: ObservableObject {
         }
         return fonts
     }()
+
+    func resetToDefaults() {
+        if launchAtLogin {
+            try? SMAppService.mainApp.unregister()
+        }
+        refreshInterval = 2
+        launchAtLogin = false
+        backgroundOpacity = 0.6
+        hudX = -1
+        hudY = -1
+        hudWidth = -1
+        hudHeight = -1
+        hudHasSavedPosition = false
+        showInFullscreen = true
+        fontName = "DepartureMono-Regular"
+        fontScale = 0
+        statusBarMetric = "cpu"
+        showComputeColumn = true
+        showMemoryColumn = true
+        showStorageColumn = true
+        showNetworkColumn = true
+        useBlockDisplay = false
+        appLanguage = LocaleManager.detectSystemLanguage()
+    }
 }

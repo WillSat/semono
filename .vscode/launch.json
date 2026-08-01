@@ -19,6 +19,66 @@
             "target": "Semono",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release Semono"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:semono}",
+            "name": "Debug power_helper",
+            "target": "power_helper",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug power_helper"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:semono}",
+            "name": "Release power_helper",
+            "target": "power_helper",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release power_helper"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:semono}",
+            "name": "Debug gpu_helper",
+            "target": "gpu_helper",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug gpu_helper"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:semono}",
+            "name": "Release gpu_helper",
+            "target": "gpu_helper",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release gpu_helper"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:semono}",
+            "name": "Debug disk_helper",
+            "target": "disk_helper",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug disk_helper"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:semono}",
+            "name": "Release disk_helper",
+            "target": "disk_helper",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release disk_helper"
         }
     ]
 }
