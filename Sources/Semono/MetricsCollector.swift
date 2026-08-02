@@ -480,31 +480,40 @@ struct Sampler: Sendable {
 
     // MARK: - Connection type + RSSI + primary interface
 
-    /// Resolves the primary service's interface (device) name so byte
-    /// counters and the connection type always refer to the same interface.
-    /// Falls back to en0 before the first successful resolution.
+    /// Resolves the connection kind and the interface the routing stack
+    /// actually uses (PrimaryInterface), so byte counters and the label
+    /// always refer to the same interface. VPN and tethering services carry
+    /// no Hardware key, so they are classified by their Type / name.
     private static func readConnectionInfo() -> (type: String, rssi: Int, interface: String) {
         guard let store = SCDynamicStoreCreate(nil, "Semono" as CFString, nil, nil) else {
             return ("---", 0, "en0")
         }
         guard let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
-              let primaryID = global["PrimaryService"] as? String,
-              let svc = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(primaryID)/Interface" as CFString) as? [String: Any],
-              let hardware = svc["Hardware"] as? String
+              let primaryID = global["PrimaryService"] as? String
         else {
             return ("---", 0, "en0")
         }
-        let device = svc["DeviceName"] as? String ?? "en0"
-        let userDefinedName = (svc["UserDefinedName"] as? String) ?? ""
+        let primaryInterface = global["PrimaryInterface"] as? String ?? "en0"
+
+        let svc = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(primaryID)/Interface" as CFString) as? [String: Any]
+        let hardware = svc?["Hardware"] as? String ?? ""
+        let type = svc?["Type"] as? String ?? ""
+        let userDefinedName = (svc?["UserDefinedName"] as? String) ?? ""
+        let device = svc?["DeviceName"] as? String ?? primaryInterface
 
         if hardware == "AirPort" {
             let rssi = CWWiFiClient.shared().interface()?.rssiValue() ?? 0
             return ("WiFi", rssi, device)
         }
-        // iPhone tethering (USB / Bluetooth PAN) shows as an Ethernet-style
-        // service; label it as its own kind instead of "Eth".
+        // iPhone tethering (USB / Bluetooth PAN) reports as an Ethernet-
+        // style service; label it as its own kind instead of "Eth".
         if userDefinedName.range(of: "iPhone", options: .caseInsensitive) != nil {
             return ("iPhone", 0, device)
+        }
+        // VPN services (TUN-mode proxies etc.) carry Type == "VPN" and no
+        // Hardware key; previously they matched nothing and showed "---".
+        if type == "VPN" {
+            return ("VPN", 0, device)
         }
         return ("Eth", 0, device)
     }
