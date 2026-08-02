@@ -494,11 +494,17 @@ struct Sampler: Sendable {
         else {
             return ("---", 0, "en0")
         }
-        let device = svc["Device"] as? String ?? "en0"
+        let device = svc["DeviceName"] as? String ?? "en0"
+        let userDefinedName = (svc["UserDefinedName"] as? String) ?? ""
 
         if hardware == "AirPort" {
             let rssi = CWWiFiClient.shared().interface()?.rssiValue() ?? 0
             return ("WiFi", rssi, device)
+        }
+        // iPhone tethering (USB / Bluetooth PAN) shows as an Ethernet-style
+        // service; label it as its own kind instead of "Eth".
+        if userDefinedName.range(of: "iPhone", options: .caseInsensitive) != nil {
+            return ("iPhone", 0, device)
         }
         return ("Eth", 0, device)
     }
