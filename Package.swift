@@ -20,22 +20,8 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "power_helper",
+            name: "stats_helper",
             path: "Helpers",
-            linkerSettings: [
-                .linkedFramework("IOKit")
-            ]
-        ),
-        .executableTarget(
-            name: "gpu_helper",
-            path: "HelpersGpu",
-            linkerSettings: [
-                .linkedFramework("IOKit")
-            ]
-        ),
-        .executableTarget(
-            name: "disk_helper",
-            path: "HelpersDisk",
             linkerSettings: [
                 .linkedFramework("IOKit")
             ]

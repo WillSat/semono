@@ -3,6 +3,7 @@ import Darwin
 import SystemConfiguration
 import CoreWLAN
 import IOKit
+import os
 
 @MainActor
 final class MetricsCollector: ObservableObject {
@@ -27,8 +28,6 @@ final class MetricsCollector: ObservableObject {
 
     init() {}
 
-    private static let sleepIntervalSeconds = 10.0
-
     private var updateTask: Task<Void, Never>?
 
     func start() {
@@ -51,7 +50,7 @@ final class MetricsCollector: ObservableObject {
 
                 self.updateSleepState(with: sample.cpuRangePct)
                 let interval = self.isSleeping
-                    ? Self.sleepIntervalSeconds
+                    ? SettingsStore.shared.sleepInterval
                     : Double(SettingsStore.shared.refreshInterval)
                 try? await Task.sleep(for: .seconds(interval))
             }
@@ -83,6 +82,7 @@ final class MetricsCollector: ObservableObject {
     func stop() {
         updateTask?.cancel()
         updateTask = nil
+        StatsHelper.shared.shutdown()
     }
 
     /// Publishes a sample. @Published fires only on actual value changes so
@@ -173,6 +173,7 @@ struct Sampler: Sendable {
     private var connCacheDate = Date.distantPast
     private var cachedConnType = ""
     private var cachedRSSI = 0
+    private var cachedInterfaceName = "en0"
     private var swapCacheDate = Date.distantPast
     private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
     private var cpuHistory: [Double] = []
@@ -220,7 +221,7 @@ struct Sampler: Sendable {
         if flags.collectNetwork {
             (s.downloadSpeed, s.uploadSpeed) = readNetwork()
             if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval {
-                (cachedConnType, cachedRSSI) = Self.readConnectionInfo()
+                (cachedConnType, cachedRSSI, cachedInterfaceName) = Self.readConnectionInfo()
                 connCacheDate = now
             }
             s.networkType = cachedConnType
@@ -228,8 +229,9 @@ struct Sampler: Sendable {
         }
 
         if flags.collectStorage {
-            // Staggered against the power helper so at most one helper spawns
-            // per tick.
+            // Kept on the original cadence (every second tick) so throughput
+            // readings are unchanged; the resident helper makes each query
+            // a sub-millisecond pipe round-trip, so no staggering is needed.
             if sampleCount % 2 == 1 {
                 (s.diskReadSpeed, s.diskWriteSpeed) = await readDisk()
             }
@@ -333,10 +335,14 @@ struct Sampler: Sendable {
         }
         guard result == KERN_SUCCESS else { return 0 }
 
-        let active     = Double(info.active_count) * Self.pageSize
+        // Approximates Activity Monitor's "App + Wired + Compressed": app
+        // pages are the internal (non-file-backed) pages minus the purgeable
+        // ones, instead of the whole active set which over-counts reclaimable
+        // file cache pages.
+        let app        = (Double(info.internal_page_count) - Double(info.purgeable_count)) * Self.pageSize
         let wired      = Double(info.wire_count) * Self.pageSize
         let compressed = Double(info.compressor_page_count) * Self.pageSize
-        let used = active + wired + compressed
+        let used = max(0, app) + wired + compressed
 
         guard Self.totalMemory > 0 else { return 0 }
         return min(1.0, used / Self.totalMemory)
@@ -364,20 +370,25 @@ struct Sampler: Sendable {
         return (Int(level), UInt64(usedBytes), ratio)
     }
 
+    /// Parses a "key = <number><unit>" token out of the vm.swapusage text.
+    /// Tolerant of decimal commas and unknown units (falls back to bytes),
+    /// and never traps on malformed input.
     private static func parseSwapField(_ str: String, key: String) -> Double {
         guard let range = str.range(of: "\(key) = ") else { return 0 }
         let after = str[range.upperBound...]
-        let parts = after.split(separator: " ")
-        guard let token = parts.first else { return 0 }
-        let raw = String(token)
-        guard let numEnd = raw.firstIndex(where: { !$0.isNumber && $0 != "." }) else { return 0 }
-        let value = Double(raw[..<numEnd]) ?? 0
-        let unit = String(raw[numEnd...]).uppercased()
-        switch unit {
+        guard let token = after.split(separator: " ").first else { return 0 }
+        let cleaned = String(token).replacingOccurrences(of: ",", with: ".")
+        guard let numEnd = cleaned.firstIndex(where: { !$0.isNumber && $0 != "." }) else {
+            return Double(cleaned) ?? 0
+        }
+        guard let value = Double(cleaned[..<numEnd]) else { return 0 }
+        switch String(cleaned[numEnd...]).uppercased() {
+        case "T": return value * 1_000_000_000_000
         case "G": return value * 1_000_000_000
         case "M": return value * 1_000_000
         case "K": return value * 1_000
-        default:  return value
+        case "B": return value
+        default:  return 0
         }
     }
 
@@ -390,14 +401,15 @@ struct Sampler: Sendable {
     // MARK: - GPU
 
     private static func readGPU() async -> Double {
-        let raw = await runHelper("gpu_helper")
+        let raw = await StatsHelper.shared.query("gpu")
         return min(1.0, (Double(raw) ?? 0) / 100.0)
     }
 
     // MARK: - Power
 
     private static func readPower() async -> Double {
-        let raw = await runHelper("power_helper")
+        // The helper reports milliwatts (AppleSmartBattery SystemLoad).
+        let raw = await StatsHelper.shared.query("power")
         return (Double(raw) ?? 0) / 1000.0
     }
 
@@ -430,7 +442,7 @@ struct Sampler: Sendable {
     }
 
     private static func readDiskBytes() async -> (UInt64, UInt64)? {
-        let raw = await runHelper("disk_helper")
+        let raw = await StatsHelper.shared.query("disk")
         let parts = raw.split(separator: " ")
         guard parts.count == 2,
               let r = UInt64(parts[0]),
@@ -438,29 +450,10 @@ struct Sampler: Sendable {
         return (r, w)
     }
 
-    /// Runs a bundled helper binary off the main thread with a timeout.
-    /// A hung helper no longer blocks the UI; it is terminated and reported as "0".
-    private static func runHelper(_ name: String, timeout: TimeInterval = 1.0) async -> String {
-        let helper = HelperProcess(name: name)
-        return await withTaskGroup(of: String.self) { group in
-            group.addTask {
-                helper.runAndRead()
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(timeout))
-                helper.task.terminate()
-                return ""
-            }
-            guard let first = await group.next() else { return "" }
-            group.cancelAll()
-            return first
-        }
-    }
-
     // MARK: - Network Bytes
 
     private mutating func readNetwork() -> (Double, Double) {
-        guard let (tx, rx) = Self.readNetworkBytes() else {
+        guard let (tx, rx) = Self.readNetworkBytes(interface: cachedInterfaceName) else {
             return (0, 0)
         }
         let now = Date()
@@ -485,25 +478,29 @@ struct Sampler: Sendable {
         return (down, up)
     }
 
-    // MARK: - Connection type + RSSI
+    // MARK: - Connection type + RSSI + primary interface
 
-    private static func readConnectionInfo() -> (type: String, rssi: Int) {
+    /// Resolves the primary service's interface (device) name so byte
+    /// counters and the connection type always refer to the same interface.
+    /// Falls back to en0 before the first successful resolution.
+    private static func readConnectionInfo() -> (type: String, rssi: Int, interface: String) {
         guard let store = SCDynamicStoreCreate(nil, "Semono" as CFString, nil, nil) else {
-            return ("---", 0)
+            return ("---", 0, "en0")
         }
         guard let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
               let primaryID = global["PrimaryService"] as? String,
               let svc = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(primaryID)/Interface" as CFString) as? [String: Any],
               let hardware = svc["Hardware"] as? String
         else {
-            return ("---", 0)
+            return ("---", 0, "en0")
         }
+        let device = svc["Device"] as? String ?? "en0"
 
         if hardware == "AirPort" {
             let rssi = CWWiFiClient.shared().interface()?.rssiValue() ?? 0
-            return ("WiFi", rssi)
+            return ("WiFi", rssi, device)
         }
-        return ("Eth", 0)
+        return ("Eth", 0, device)
     }
 
     // MARK: - Hardware Info (collected once)
@@ -550,7 +547,7 @@ struct Sampler: Sendable {
 
     // MARK: - Shared helpers
 
-    private static func readNetworkBytes() -> (tx: UInt64, rx: UInt64)? {
+    private static func readNetworkBytes(interface: String) -> (tx: UInt64, rx: UInt64)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(first) }
@@ -560,7 +557,7 @@ struct Sampler: Sendable {
             defer { ptr = ptr?.pointee.ifa_next }
             guard let ifa = ptr else { continue }
             let name = String(cString: ifa.pointee.ifa_name)
-            guard name == "en0" else { continue }
+            guard name == interface else { continue }
             guard let sa = ifa.pointee.ifa_addr,
                   sa.pointee.sa_family == UInt8(AF_LINK) else { continue }
             let data = ifa.pointee.ifa_data.assumingMemoryBound(to: if_data.self).pointee
@@ -576,29 +573,179 @@ struct Sampler: Sendable {
     private static let kCPUStateNice   = Int32(3)
 }
 
-// Wraps Process/Pipe so the helper can be run off the main actor.
-// Access is confined: runAndRead() runs on one worker thread, terminate() is
-// documented thread-safe, so @unchecked Sendable is acceptable here.
-private final class HelperProcess: @unchecked Sendable {
-    let task: Process
-    private let pipe: Pipe
+// MARK: - Resident stats helper
 
-    init(name: String) {
-        let task = Process()
-        task.executableURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/\(name)")
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        self.task = task
-        self.pipe = pipe
+/// Persistent client for the bundled `stats_helper` subprocess. A single
+/// resident process serves GPU / power / disk readings over a line protocol
+/// (request line in, response line out), replacing the previous per-tick
+/// process spawns.
+///
+/// Requests are serialized (the sampler awaits each one). A request that
+/// does not answer within the timeout terminates the helper; the next query
+/// respawns it, so a hung helper recovers by itself and no worker thread is
+/// ever blocked — responses arrive through the pipe's readability handler.
+private final class StatsHelper: @unchecked Sendable {
+    static let shared = StatsHelper()
+
+    private let lock = NSLock()
+    private var process: Process?
+    private var writeHandle: FileHandle?
+    private var readHandle: FileHandle?
+    private var pending: CheckedContinuation<String, Never>?
+    private var buffer = Data()
+    private let logger = Logger(subsystem: "com.semono.app", category: "stats_helper")
+    private var warnedSpawn = false
+    private var warnedHang = false
+
+    private init() {}
+
+    /// Sends one request line and returns the response line. Returns ""
+    /// when the helper cannot be launched, times out, or dies.
+    func query(_ name: String, timeout: TimeInterval = 2.0) async -> String {
+        await withTaskGroup(of: String.self) { group in
+            group.addTask { await self.performQuery(name) }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeout))
+                self.handleTimeout()
+                return ""
+            }
+            guard let first = await group.next() else { return "" }
+            group.cancelAll()
+            return first
+        }
     }
 
-    func runAndRead() -> String {
-        guard (try? task.run()) != nil else { return "" }
-        task.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    /// Kills the helper so no orphan remains after the app quits. Resumes
+    /// any in-flight request with "".
+    func shutdown() {
+        lock.lock()
+        let proc = process
+        process = nil
+        if let h = readHandle { h.readabilityHandler = nil }
+        readHandle = nil
+        writeHandle = nil
+        buffer = Data()
+        let cont = pending
+        pending = nil
+        lock.unlock()
+        proc?.terminate()
+        cont?.resume(returning: "")
+    }
+
+    private func performQuery(_ name: String) async -> String {
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if process == nil || !(process?.isRunning ?? false) {
+                spawnLocked()
+            }
+            let canServe = (process?.isRunning ?? false) && pending == nil
+            guard canServe else {
+                if process == nil {
+                    warnOnce(flag: &warnedSpawn,
+                             message: "stats_helper could not be launched; GPU/power/disk will read 0")
+                }
+                lock.unlock()
+                cont.resume(returning: "")
+                return
+            }
+            pending = cont
+            lock.unlock()
+            if let data = (name + "\n").data(using: .utf8) {
+                try? writeHandle?.write(contentsOf: data)
+            }
+        }
+    }
+
+    private func spawnLocked() {
+        if let h = readHandle { h.readabilityHandler = nil }
+        readHandle = nil
+        writeHandle = nil
+        buffer = Data()
+
+        let name = "stats_helper"
+        var url = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(name)")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            // Debug runs (`swift run`) place the helper next to the executable.
+            url = Bundle.main.bundleURL.appendingPathComponent(name)
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            process = nil
+            return
+        }
+
+        let task = Process()
+        task.executableURL = url
+        let out = Pipe()
+        let input = Pipe()
+        task.standardOutput = out
+        task.standardInput = input
+        do {
+            try task.run()
+        } catch {
+            process = nil
+            return
+        }
+
+        process = task
+        writeHandle = input.fileHandleForWriting
+        readHandle = out.fileHandleForReading
+        warnedSpawn = false
+        warnedHang = false
+        readHandle?.readabilityHandler = { [weak self] handle in
+            guard let self else { return }
+            let data = handle.availableData
+            self.lock.lock()
+            if data.isEmpty {
+                // EOF: the helper died (or was terminated). Release the
+                // request; the next query respawns it.
+                handle.readabilityHandler = nil
+                self.process = nil
+                self.readHandle = nil
+                self.writeHandle = nil
+                self.buffer = Data()
+                let cont = self.pending
+                self.pending = nil
+                self.lock.unlock()
+                cont?.resume(returning: "")
+                return
+            }
+            self.buffer.append(data)
+            if let nl = self.buffer.firstIndex(of: 0x0A) {
+                let line = String(data: Data(self.buffer[..<nl]), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                self.buffer = Data(self.buffer[(nl + 1)...])
+                let cont = self.pending
+                self.pending = nil
+                self.lock.unlock()
+                cont?.resume(returning: line)
+            } else {
+                self.lock.unlock()
+            }
+        }
+    }
+
+    /// Timeout path: abandon the request and kill the helper. The EOF
+    /// handler observes the termination and frees the pipe state.
+    private func handleTimeout() {
+        lock.lock()
+        let proc = process
+        let cont = pending
+        let alive = (proc?.isRunning ?? false) && cont != nil
+        if alive {
+            pending = nil
+        }
+        lock.unlock()
+        guard alive else { return }
+        warnOnce(flag: &warnedHang,
+                 message: "stats_helper did not answer in time; restarting it")
+        proc?.terminate()
+        cont?.resume(returning: "")
+    }
+
+    private func warnOnce(flag: inout Bool, message: String) {
+        guard !flag else { return }
+        flag = true
+        logger.error("\(message, privacy: .public)")
     }
 }
 

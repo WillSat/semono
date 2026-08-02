@@ -135,10 +135,17 @@ struct HUDView: View {
                     .font(.custom(currentFont, size: labelFontSz))
                     .foregroundColor(.white.opacity(0.4))
                 Spacer(minLength: minSpacer)
-                Text(String(format: "%3d", metrics.wifiRSSI))
-                    .font(.custom(currentFont, size: valueFontSz))
-                    .foregroundColor(ColorScale.color(forRSSI: metrics.wifiRSSI))
-                    .monospacedDigit()
+                if metrics.wifiRSSI == 0 {
+                    // rssiValue() == 0 means "unavailable", not 0 dBm.
+                    Text("  \u{2014}")
+                        .font(.custom(currentFont, size: valueFontSz))
+                        .foregroundColor(.white.opacity(0.4))
+                } else {
+                    Text(String(format: "%3d", metrics.wifiRSSI))
+                        .font(.custom(currentFont, size: valueFontSz))
+                        .foregroundColor(ColorScale.color(forRSSI: metrics.wifiRSSI))
+                        .monospacedDigit()
+                }
             }
             .frame(height: valueFontSz * 1.15)
         } else {
@@ -176,14 +183,19 @@ struct HUDView: View {
 
     private func fmtPct(_ v: Double) -> String { String(format: "%3d%%", Int(v * 100)) }
     private func fmtPwr(_ w: Double) -> String { String(format: "%4.1f", w) }
-    private func levelRatio(_ level: Int) -> Double { Double(level + 1) / 4.0 }
+    /// 0..3 level to a 0..1 bar ratio; level 0 renders as an empty bar.
+    private func levelRatio(_ level: Int) -> Double { Double(level) / 3.0 }
 
     private func fmtSwap(_ bytes: UInt64) -> String {
         let raw: String
         if bytes >= 1_000_000_000 {
             raw = String(format: "%.1fG", Double(bytes) / 1_000_000_000)
-        } else {
+        } else if bytes >= 1_000_000 {
             raw = String(format: "%.0fM", Double(bytes) / 1_000_000)
+        } else if bytes >= 1_000 {
+            raw = String(format: "%.0fK", Double(bytes) / 1_000)
+        } else {
+            raw = "\(bytes)B"
         }
         return pad(raw, to: 4)
     }

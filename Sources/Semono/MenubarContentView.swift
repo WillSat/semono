@@ -28,6 +28,16 @@ final class MenubarContentView: NSView {
     /// Menu-bar standard icon size (matches other status icons).
     private static let leafSize: CGFloat = 18
 
+    /// Built once instead of per draw.
+    private static let leaf: NSImage? = {
+        let config = NSImage.SymbolConfiguration(pointSize: leafSize, weight: .regular)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor.labelColor]))
+        return NSImage(
+            systemSymbolName: "leaf.fill",
+            accessibilityDescription: "Sleeping"
+        )?.withSymbolConfiguration(config)
+    }()
+
     private var valueAttrs: [NSAttributedString.Key: Any] {
         [
             .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold),
@@ -61,7 +71,7 @@ final class MenubarContentView: NSView {
         super.draw(dirtyRect)
 
         if isSleeping {
-            if let leaf = Self.leafImage() {
+            if let leaf = Self.leaf {
                 let size = Self.leafSize
                 leaf.draw(in: NSRect(
                     x: (bounds.width - size) / 2,
@@ -85,15 +95,6 @@ final class MenubarContentView: NSView {
 
         type.draw(at: NSPoint(x: x, y: y))
         value.draw(at: NSPoint(x: x, y: y + typeSize.height - 1))
-    }
-
-    private static func leafImage() -> NSImage? {
-        let config = NSImage.SymbolConfiguration(pointSize: leafSize, weight: .regular)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor.labelColor]))
-        return NSImage(
-            systemSymbolName: "leaf.fill",
-            accessibilityDescription: "Sleeping"
-        )?.withSymbolConfiguration(config)
     }
 
     override func mouseDown(with event: NSEvent) {

@@ -25,6 +25,7 @@ final class SettingsStore: ObservableObject {
     @AppStorage("adaptiveSleep") var adaptiveSleep = true
     @AppStorage("sleepSensitivity") var sleepSensitivity: Double = 7
     @AppStorage("sleepHysteresis") var sleepHysteresis: Double = 3
+    @AppStorage("sleepInterval") var sleepInterval: Double = 10
     @AppStorage("appLanguage") var appLanguage = LocaleManager.detectSystemLanguage()
 
     static let availableFonts: [(name: String, label: String)] = {
@@ -69,6 +70,7 @@ final class SettingsStore: ObservableObject {
         adaptiveSleep = true
         sleepSensitivity = 7
         sleepHysteresis = 3
+        sleepInterval = 10
         appLanguage = LocaleManager.detectSystemLanguage()
     }
 }

@@ -154,26 +154,40 @@ struct SettingsView: View {
 
                 if settings.adaptiveSleep {
                     LabeledContent(locale.localized("Sleep Sensitivity")) {
-                        HStack(spacing: 8) {
-                            Slider(value: $settings.sleepSensitivity, in: 3...20, step: 1)
-                                .frame(width: 170)
-                            Text("\(Int(settings.sleepSensitivity))%")
-                                .font(.system(.body, design: .monospaced))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .trailing)
+                        Picker("", selection: $settings.sleepSensitivity) {
+                            Text("3%").tag(3.0)
+                            Text("5%").tag(5.0)
+                            Text("7%").tag(7.0)
+                            Text("10%").tag(10.0)
+                            Text("15%").tag(15.0)
+                            Text("20%").tag(20.0)
                         }
+                        .labelsHidden()
+                        .frame(width: 90)
                     }
                     LabeledContent(locale.localized("Hysteresis")) {
-                        HStack(spacing: 8) {
-                            Slider(value: $settings.sleepHysteresis, in: 1...10, step: 1)
-                                .frame(width: 170)
-                            Text("\(Int(settings.sleepHysteresis))%")
-                                .font(.system(.body, design: .monospaced))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .trailing)
+                        Picker("", selection: $settings.sleepHysteresis) {
+                            Text("1%").tag(1.0)
+                            Text("2%").tag(2.0)
+                            Text("3%").tag(3.0)
+                            Text("5%").tag(5.0)
+                            Text("8%").tag(8.0)
+                            Text("10%").tag(10.0)
                         }
+                        .labelsHidden()
+                        .frame(width: 90)
+                    }
+                    LabeledContent(locale.localized("Sleep Interval")) {
+                        Picker("", selection: $settings.sleepInterval) {
+                            Text("8s").tag(8.0)
+                            Text("10s").tag(10.0)
+                            Text("15s").tag(15.0)
+                            Text("20s").tag(20.0)
+                            Text("30s").tag(30.0)
+                            Text("60s").tag(60.0)
+                        }
+                        .labelsHidden()
+                        .frame(width: 90)
                     }
                     Text(locale.localized("Sleep when the last 5 CPU samples stay within the sensitivity; wake when they exceed sensitivity + hysteresis."))
                         .font(.caption)

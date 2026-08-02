@@ -9,7 +9,27 @@ enum AppLanguage: String, CaseIterable {
 final class LocaleManager: ObservableObject {
     static let shared = LocaleManager()
 
-    @AppStorage("appLanguage") var appLanguage: String = LocaleManager.detectSystemLanguage()
+    /// Mirrors the "appLanguage" UserDefaults key (whose single source of
+    /// truth is SettingsStore). Kept in sync via defaults-change
+    /// notifications so there is exactly one writer of the key.
+    @Published private(set) var appLanguage: String
+    private var defaultsObserver: NSObjectProtocol?
+
+    private init() {
+        appLanguage = UserDefaults.standard.string(forKey: "appLanguage") ?? Self.detectSystemLanguage()
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let stored = UserDefaults.standard.string(forKey: "appLanguage") ?? Self.detectSystemLanguage()
+                guard stored != self.appLanguage else { return }
+                self.appLanguage = stored
+            }
+        }
+    }
 
     static func detectSystemLanguage() -> String {
         let lang = Locale.current.language.languageCode?.identifier ?? "en"
@@ -51,6 +71,7 @@ final class LocaleManager: ObservableObject {
         "Adaptive Sleep": "智能休眠",
         "Sleep Sensitivity": "休眠灵敏度",
         "Hysteresis": "迟滞",
+        "Sleep Interval": "休眠间隔",
         "Sleep when the last 5 CPU samples stay within the sensitivity; wake when they exceed sensitivity + hysteresis.": "最近 5 次样本的 CPU 变化极差 ≤ 灵敏度时休眠，超过 灵敏度+迟滞 时唤醒。休眠期间刷新间隔自动变为 10 秒。",
         "Per Core": "每核",
         "Settings apply immediately": "设置即时生效",

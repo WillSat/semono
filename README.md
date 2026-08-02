@@ -22,7 +22,10 @@ Four configurable columns:
 
 - Departure Mono pixel font at 11 pt — crisp on Retina, font scale adjustable
 - CPU / GPU / memory / power / disk / network — 1–5 s refresh
-- Wi‑Fi RSSI via CoreWLAN; Ethernet / offline detection
+- Adaptive sleep: refresh throttles to 8–60 s (default 10 s) when CPU load is
+  stable, with sensitivity / hysteresis controls
+- Wi‑Fi RSSI via CoreWLAN; Ethernet / offline detection — byte counters track
+  the primary service's interface
 - Transparent floating window, draggable anywhere (including tucking under
   the Dock), position remembered across restarts
 - Menu bar icon with live metric readout, Settings and Quit
@@ -31,12 +34,14 @@ Four configurable columns:
   (per-core CPU, GPU, memory, storage, network, thermal) with pause-free
   live history
 - Chinese / English UI language switch
+- Single resident stats helper process serves all GPU / power / disk reads —
+  no per-tick subprocess spawning, so the HUD measures the system, not itself
 
 ## Settings
 
 | Setting | Options | Default |
 |---------|---------|---------|
-| Refresh interval | 1 / 2 / 3 / 5 s | 2 s |
+| Refresh interval | 1 / 2 / 3 / 5 s | 1 s |
 | Background opacity | 0 – 100 % | 60 % |
 | Show in fullscreen | on / off | on |
 | Block display | on / off | off |
@@ -44,18 +49,25 @@ Four configurable columns:
 | Font scale | −5 … +10 | 0 |
 | Columns | Compute / Memory / Storage / Network | all on |
 | Menu bar metric | CPU / GPU / PWR / MEM | CPU |
+| Adaptive sleep | on / off | on |
+| Sleep sensitivity | 3 / 5 / 7 / 10 / 15 / 20 % | 7 % |
+| Hysteresis | 1 / 2 / 3 / 5 / 8 / 10 % | 3 % |
+| Sleep interval | 8 / 10 / 15 / 20 / 30 / 60 s | 10 s |
 | Launch at login | on / off | off |
 | Language | English / 中文 | system |
 
 ## Build
 
-macOS 26+ (Tahoe design language), Swift 6, Xcode (CommandLineTools lacks the
-SwiftUI macro plugin used by the macOS 27 SDK).
+macOS 26+ (Tahoe design language), Swift 6, Xcode or Xcode beta
+(CommandLineTools lacks the SwiftUI macro plugin used by the macOS 27 SDK).
 
 ```bash
-./build.sh
+./build.sh          # builds the app + stats_helper, assembles .build/Semono.app
 open .build/Semono.app
 ```
+
+The bundled `stats_helper` executable (GPU / power / disk sampling) is built
+and copied into the app bundle automatically.
 
 ## License
 

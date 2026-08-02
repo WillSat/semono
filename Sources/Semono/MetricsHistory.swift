@@ -22,6 +22,26 @@ final class MetricsHistory: ObservableObject {
         let downloadSpeed: Double
         let uploadSpeed: Double
         let wifiRSSI: Int
+
+        /// Value equality deliberately ignores the timestamp so identical
+        /// readings collapse into one history point (see `record`).
+        static func == (lhs: Snapshot, rhs: Snapshot) -> Bool {
+            lhs.cpuUsage == rhs.cpuUsage &&
+            lhs.perCoreCPU == rhs.perCoreCPU &&
+            lhs.perCoreFreqMHz == rhs.perCoreFreqMHz &&
+            lhs.gpuUsage == rhs.gpuUsage &&
+            lhs.powerUsage == rhs.powerUsage &&
+            lhs.memoryUsage == rhs.memoryUsage &&
+            lhs.swapBytes == rhs.swapBytes &&
+            lhs.swapRatio == rhs.swapRatio &&
+            lhs.memoryPressureLevel == rhs.memoryPressureLevel &&
+            lhs.diskReadSpeed == rhs.diskReadSpeed &&
+            lhs.diskWriteSpeed == rhs.diskWriteSpeed &&
+            lhs.thermalState == rhs.thermalState &&
+            lhs.downloadSpeed == rhs.downloadSpeed &&
+            lhs.uploadSpeed == rhs.uploadSpeed &&
+            lhs.wifiRSSI == rhs.wifiRSSI
+        }
     }
 
     @Published var snapshots: [Snapshot] = []
@@ -45,6 +65,9 @@ final class MetricsHistory: ObservableObject {
             uploadSpeed: metrics.uploadSpeed,
             wifiRSSI: metrics.wifiRSSI
         )
+        // Skip identical values so a static machine (adaptive sleep) does not
+        // publish and re-render the monitor charts pointlessly.
+        if let last = snapshots.last, last == snap { return }
         snapshots.append(snap)
         if snapshots.count > Self.maxDataPoints {
             snapshots.removeFirst(snapshots.count - Self.maxDataPoints)

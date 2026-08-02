@@ -27,20 +27,12 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
 cp "$BIN_PATH" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 
-# Copy helpers
-HELPER_PATH="${BIN_DIR}/power_helper"
+# Copy the resident stats helper (serves GPU / power / disk over stdin/stdout)
+HELPER_PATH="${BIN_DIR}/stats_helper"
 if [ -f "$HELPER_PATH" ]; then
-    cp "$HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/power_helper"
-fi
-
-GPU_HELPER_PATH="${BIN_DIR}/gpu_helper"
-if [ -f "$GPU_HELPER_PATH" ]; then
-    cp "$GPU_HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/gpu_helper"
-fi
-
-DISK_HELPER_PATH="${BIN_DIR}/disk_helper"
-if [ -f "$DISK_HELPER_PATH" ]; then
-    cp "$DISK_HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/disk_helper"
+    cp "$HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/stats_helper"
+else
+    echo "==> warning: stats_helper binary not found"
 fi
 
 # Generate app icon from icon.png
@@ -79,9 +71,9 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.5</string>
+    <string>1.8</string>
     <key>CFBundleVersion</key>
-    <string>15</string>
+    <string>18</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
