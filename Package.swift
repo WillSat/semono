@@ -25,6 +25,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("IOKit")
             ]
+        ),
+        .testTarget(
+            name: "SemonoTests",
+            dependencies: ["Semono"]
         )
     ]
 )

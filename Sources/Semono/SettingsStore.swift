@@ -5,7 +5,7 @@ import ServiceManagement
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
-    @AppStorage("refreshInterval") var refreshInterval = 1
+    @AppStorage("refreshInterval") var refreshInterval = 3
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("backgroundOpacity") var backgroundOpacity = 0.6
     @AppStorage("hudX") var hudX: Double = -1
@@ -22,10 +22,6 @@ final class SettingsStore: ObservableObject {
     @AppStorage("showStorageColumn") var showStorageColumn = true
     @AppStorage("showNetworkColumn") var showNetworkColumn = true
     @AppStorage("useBlockDisplay") var useBlockDisplay = false
-    @AppStorage("adaptiveSleep") var adaptiveSleep = true
-    @AppStorage("sleepSensitivity") var sleepSensitivity: Double = 7
-    @AppStorage("sleepHysteresis") var sleepHysteresis: Double = 3
-    @AppStorage("sleepInterval") var sleepInterval: Double = 10
     @AppStorage("appLanguage") var appLanguage = LocaleManager.detectSystemLanguage()
 
     static let availableFonts: [(name: String, label: String)] = {
@@ -50,7 +46,7 @@ final class SettingsStore: ObservableObject {
         if launchAtLogin {
             try? SMAppService.mainApp.unregister()
         }
-        refreshInterval = 1
+        refreshInterval = 3
         launchAtLogin = false
         backgroundOpacity = 0.6
         hudX = -1
@@ -67,10 +63,6 @@ final class SettingsStore: ObservableObject {
         showStorageColumn = true
         showNetworkColumn = true
         useBlockDisplay = false
-        adaptiveSleep = true
-        sleepSensitivity = 7
-        sleepHysteresis = 3
-        sleepInterval = 10
         appLanguage = LocaleManager.detectSystemLanguage()
     }
 }

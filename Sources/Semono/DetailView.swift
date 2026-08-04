@@ -73,6 +73,8 @@ struct DetailView: View {
                 .help(locale.localized("Refresh:"))
             }
         }
+        .onAppear { MetricsHistory.shared.isRecording = true }
+        .onDisappear { MetricsHistory.shared.isRecording = false }
     }
 
     private var sidebar: some View {

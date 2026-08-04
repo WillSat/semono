@@ -46,6 +46,11 @@ final class MetricsHistory: ObservableObject {
 
     @Published var snapshots: [Snapshot] = []
 
+    /// Toggled by the monitor window while it is on screen. History is only
+    /// recorded then, so the per-tick snapshot allocation and publish are
+    /// skipped entirely while no chart is visible.
+    var isRecording = false
+
     func record(from metrics: MetricsCollector) {
         let snap = Snapshot(
             timestamp: Date(),

@@ -22,8 +22,6 @@ Four configurable columns:
 
 - Departure Mono pixel font at 11 pt — crisp on Retina, font scale adjustable
 - CPU / GPU / memory / power / disk / network — 1–5 s refresh
-- Adaptive sleep: refresh throttles to 8–60 s (default 10 s) when CPU load is
-  stable, with sensitivity / hysteresis controls
 - Wi‑Fi RSSI via CoreWLAN; Ethernet / offline detection — byte counters track
   the primary service's interface
 - Transparent floating window, draggable anywhere (including tucking under
@@ -41,7 +39,7 @@ Four configurable columns:
 
 | Setting | Options | Default |
 |---------|---------|---------|
-| Refresh interval | 1 / 2 / 3 / 5 s | 1 s |
+| Refresh interval | 1 / 2 / 3 / 5 s | 3 s |
 | Background opacity | 0 – 100 % | 60 % |
 | Show in fullscreen | on / off | on |
 | Block display | on / off | off |
@@ -49,10 +47,6 @@ Four configurable columns:
 | Font scale | −5 … +10 | 0 |
 | Columns | Compute / Memory / Storage / Network | all on |
 | Menu bar metric | CPU / GPU / PWR / MEM | CPU |
-| Adaptive sleep | on / off | on |
-| Sleep sensitivity | 3 / 5 / 7 / 10 / 15 / 20 % | 7 % |
-| Hysteresis | 1 / 2 / 3 / 5 / 8 / 10 % | 3 % |
-| Sleep interval | 8 / 10 / 15 / 20 / 30 / 60 s | 10 s |
 | Launch at login | on / off | off |
 | Language | English / 中文 | system |
 

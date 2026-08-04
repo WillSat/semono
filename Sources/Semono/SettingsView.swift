@@ -150,49 +150,6 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 150)
                 }
-                Toggle(locale.localized("Adaptive Sleep"), isOn: $settings.adaptiveSleep)
-
-                if settings.adaptiveSleep {
-                    LabeledContent(locale.localized("Sleep Sensitivity")) {
-                        Picker("", selection: $settings.sleepSensitivity) {
-                            Text("3%").tag(3.0)
-                            Text("5%").tag(5.0)
-                            Text("7%").tag(7.0)
-                            Text("10%").tag(10.0)
-                            Text("15%").tag(15.0)
-                            Text("20%").tag(20.0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 90)
-                    }
-                    LabeledContent(locale.localized("Hysteresis")) {
-                        Picker("", selection: $settings.sleepHysteresis) {
-                            Text("1%").tag(1.0)
-                            Text("2%").tag(2.0)
-                            Text("3%").tag(3.0)
-                            Text("5%").tag(5.0)
-                            Text("8%").tag(8.0)
-                            Text("10%").tag(10.0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 90)
-                    }
-                    LabeledContent(locale.localized("Sleep Interval")) {
-                        Picker("", selection: $settings.sleepInterval) {
-                            Text("8s").tag(8.0)
-                            Text("10s").tag(10.0)
-                            Text("15s").tag(15.0)
-                            Text("20s").tag(20.0)
-                            Text("30s").tag(30.0)
-                            Text("60s").tag(60.0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 90)
-                    }
-                    Text(locale.localized("Sleep when the last 5 CPU samples stay within the sensitivity; wake when they exceed sensitivity + hysteresis."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 Toggle(locale.localized("Launch at Login"), isOn: loginBinding)
             } header: {
                 SettingsSectionHeader(icon: "gearshape", title: locale.localized("General"))

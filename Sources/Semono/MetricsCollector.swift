@@ -23,8 +23,6 @@ final class MetricsCollector: ObservableObject {
     @Published var diskReadSpeed: Double = 0
     @Published var diskWriteSpeed: Double = 0
     @Published var thermalState: Int = 0
-    /// Adaptive sleep: sampling drops to 10s while CPU is stable.
-    @Published var isSleeping = false
 
     init() {}
 
@@ -48,34 +46,15 @@ final class MetricsCollector: ObservableObject {
                 let sample = await sampler.sampleOnce(flags: flags)
                 self.apply(sample)
 
-                self.updateSleepState(with: sample.cpuRangePct)
-                let interval = self.isSleeping
-                    ? SettingsStore.shared.sleepInterval
-                    : Double(SettingsStore.shared.refreshInterval)
-                try? await Task.sleep(for: .seconds(interval))
+                let interval = Double(SettingsStore.shared.refreshInterval)
+                // Tolerance lets the kernel coalesce this wakeup with other
+                // system timers instead of the process waking alone on every
+                // tick; the HUD needs no tick-level precision.
+                try? await Task.sleep(
+                    for: .seconds(interval),
+                    tolerance: .seconds(min(interval * 0.2, 1.0))
+                )
             }
-        }
-    }
-
-    /// Hysteresis state machine: sleep when the CPU range of the last
-    /// `sleepWindow` samples stays within the sensitivity; wake when it
-    /// exceeds sensitivity + hysteresis. Disabled toggle forces wake.
-    private func updateSleepState(with range: Double?) {
-        let store = SettingsStore.shared
-        guard store.adaptiveSleep else {
-            if isSleeping { isSleeping = false }
-            return
-        }
-        guard let range else { return }
-
-        let target: Bool
-        if isSleeping {
-            target = range < store.sleepSensitivity + store.sleepHysteresis
-        } else {
-            target = range <= store.sleepSensitivity
-        }
-        if isSleeping != target {
-            isSleeping = target
         }
     }
 
@@ -105,7 +84,11 @@ final class MetricsCollector: ObservableObject {
         if diskWriteSpeed != s.diskWriteSpeed { diskWriteSpeed = s.diskWriteSpeed }
         if thermalState != s.thermalState { thermalState = s.thermalState }
 
-        MetricsHistory.shared.record(from: self)
+        // History is only maintained while the monitor window is on screen;
+        // otherwise each tick's snapshot allocation is pure overhead.
+        if MetricsHistory.shared.isRecording {
+            MetricsHistory.shared.record(from: self)
+        }
     }
 }
 
@@ -141,18 +124,12 @@ struct Sampler: Sendable {
         var diskReadSpeed: Double = 0
         var diskWriteSpeed: Double = 0
         var thermalState: Int = 0
-        /// Range (max − min) of the last `sleepWindow` CPU samples in percent
-        /// points. nil until the window fills, so sleep never engages on
-        /// startup.
-        var cpuRangePct: Double? = nil
     }
 
     // Slow-moving readings are cached and refreshed on longer intervals.
-    private static let freqCacheInterval: TimeInterval = 10
-    private static let connCacheInterval: TimeInterval = 5
-    private static let swapCacheInterval: TimeInterval = 5
-    /// Rolling window used to judge CPU stability for adaptive sleep.
-    static let sleepWindow = 5
+    private static let freqCacheInterval: TimeInterval = 30
+    private static let connCacheInterval: TimeInterval = 15
+    private static let swapCacheInterval: TimeInterval = 10
 
     private var prevCpuUsed: UInt64 = 0
     private var prevCpuTotal: UInt64 = 0
@@ -176,14 +153,36 @@ struct Sampler: Sendable {
     private var cachedInterfaceName = "en0"
     private var swapCacheDate = Date.distantPast
     private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
-    private var cpuHistory: [Double] = []
 
     mutating func sampleOnce(flags: Flags) async -> Sample {
         var s = Sample()
         let now = Date()
 
-        if flags.collectGPU {
-            s.gpuUsage = await Self.readGPU()
+        let wantsGPU = flags.collectGPU
+        let wantsPower = flags.collectPower
+        let wantsDisk = flags.collectStorage
+        // When two or more helper-backed metrics are live, a single "all"
+        // request serves them in one pipe round-trip and one IOKit pass.
+        // A lone metric keeps its dedicated query (and the previous
+        // every-second-tick staggering for power/disk).
+        if (wantsGPU ? 1 : 0) + (wantsPower ? 1 : 0) + (wantsDisk ? 1 : 0) >= 2 {
+            let (gpu, power, disk) = await Self.readAll()
+            if wantsGPU { s.gpuUsage = gpu }
+            if wantsPower { s.powerUsage = power }
+            if wantsDisk {
+                (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(disk)
+            }
+        } else {
+            if wantsGPU {
+                s.gpuUsage = await Self.readGPU()
+            }
+            if wantsPower {
+                if sampleCount % 2 == 0 { cachedPower = await Self.readPower() }
+                s.powerUsage = cachedPower
+            }
+            if wantsDisk && sampleCount % 2 == 1 {
+                (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(await Self.readDiskBytes())
+            }
         }
         if flags.collectCPU {
             (s.cpuUsage, s.perCoreCPU) = readCPU()
@@ -192,14 +191,6 @@ struct Sampler: Sendable {
                 freqCacheDate = now
             }
             s.perCoreFreqMHz = cachedFreq
-
-            cpuHistory.append(s.cpuUsage * 100)
-            if cpuHistory.count > Self.sleepWindow {
-                cpuHistory.removeFirst(cpuHistory.count - Self.sleepWindow)
-            }
-            if cpuHistory.count >= Self.sleepWindow {
-                s.cpuRangePct = (cpuHistory.max() ?? 0) - (cpuHistory.min() ?? 0)
-            }
         }
 
         if flags.collectMemory {
@@ -213,11 +204,6 @@ struct Sampler: Sendable {
 
         s.thermalState = Self.readThermalState()
 
-        if flags.collectPower {
-            if sampleCount % 2 == 0 { cachedPower = await Self.readPower() }
-            s.powerUsage = cachedPower
-        }
-
         if flags.collectNetwork {
             (s.downloadSpeed, s.uploadSpeed) = readNetwork()
             if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval {
@@ -226,15 +212,6 @@ struct Sampler: Sendable {
             }
             s.networkType = cachedConnType
             s.wifiRSSI = cachedRSSI
-        }
-
-        if flags.collectStorage {
-            // Kept on the original cadence (every second tick) so throughput
-            // readings are unchanged; the resident helper makes each query
-            // a sub-millisecond pipe round-trip, so no staggering is needed.
-            if sampleCount % 2 == 1 {
-                (s.diskReadSpeed, s.diskWriteSpeed) = await readDisk()
-            }
         }
 
         sampleCount &+= 1
@@ -360,36 +337,14 @@ struct Sampler: Sendable {
         guard swapSize > 0 else { return (Int(level), 0, 0) }
 
         var buf = [CChar](repeating: 0, count: swapSize)
-        sysctlbyname("vm.swapusage", &buf, &swapSize, nil, 0)
-        let str = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        var outSize = swapSize
+        guard sysctlbyname("vm.swapusage", &buf, &outSize, nil, 0) == 0, outSize > 0 else {
+            return (Int(level), 0, 0)
+        }
 
-        let usedBytes = parseSwapField(str, key: "used")
-        let totalBytes = parseSwapField(str, key: "total")
+        let (totalBytes, usedBytes) = SwapParser.usage(from: buf, size: outSize)
         let ratio: Double = totalBytes > 0 ? min(1.0, Double(usedBytes) / Double(totalBytes)) : 0
-
-        return (Int(level), UInt64(usedBytes), ratio)
-    }
-
-    /// Parses a "key = <number><unit>" token out of the vm.swapusage text.
-    /// Tolerant of decimal commas and unknown units (falls back to bytes),
-    /// and never traps on malformed input.
-    private static func parseSwapField(_ str: String, key: String) -> Double {
-        guard let range = str.range(of: "\(key) = ") else { return 0 }
-        let after = str[range.upperBound...]
-        guard let token = after.split(separator: " ").first else { return 0 }
-        let cleaned = String(token).replacingOccurrences(of: ",", with: ".")
-        guard let numEnd = cleaned.firstIndex(where: { !$0.isNumber && $0 != "." }) else {
-            return Double(cleaned) ?? 0
-        }
-        guard let value = Double(cleaned[..<numEnd]) else { return 0 }
-        switch String(cleaned[numEnd...]).uppercased() {
-        case "T": return value * 1_000_000_000_000
-        case "G": return value * 1_000_000_000
-        case "M": return value * 1_000_000
-        case "K": return value * 1_000
-        case "B": return value
-        default:  return 0
-        }
+        return (Int(level), usedBytes, ratio)
     }
 
     // MARK: - Thermal
@@ -405,6 +360,22 @@ struct Sampler: Sendable {
         return min(1.0, (Double(raw) ?? 0) / 100.0)
     }
 
+    /// One "all" request to the resident helper returns GPU percent,
+    /// milliwatts, and the read/write byte counters on a single line, so
+    /// the pipe round-trip and IOKit pass happen once per tick instead of
+    /// one round-trip per metric.
+    private static func readAll() async -> (gpu: Double, power: Double, disk: (UInt64, UInt64)?) {
+        let raw = await StatsHelper.shared.query("all")
+        let parts = raw.split(separator: " ")
+        guard parts.count >= 4,
+              let gpuPct = Double(parts[0]),
+              let mw = Double(parts[1]),
+              let read = UInt64(parts[2]),
+              let write = UInt64(parts[3])
+        else { return (0, 0, nil) }
+        return (min(1.0, gpuPct / 100.0), mw / 1000.0, (read, write))
+    }
+
     // MARK: - Power
 
     private static func readPower() async -> Double {
@@ -415,8 +386,8 @@ struct Sampler: Sendable {
 
     // MARK: - Disk
 
-    private mutating func readDisk() async -> (Double, Double) {
-        guard let (r, w) = await Self.readDiskBytes() else {
+    private mutating func readDisk(_ bytes: (UInt64, UInt64)?) -> (Double, Double) {
+        guard let (r, w) = bytes else {
             return (0, 0)
         }
         let now = Date()
@@ -599,14 +570,22 @@ struct Sampler: Sendable {
 /// does not answer within the timeout terminates the helper; the next query
 /// respawns it, so a hung helper recovers by itself and no worker thread is
 /// ever blocked — responses arrive through the pipe's readability handler.
+///
+/// All state is guarded by `lock`. The readability handler is dispatched on
+/// its own queue and may interleave with request submission, so it captures
+/// the process it belongs to and only mutates state while that process is
+/// still the current one — a late EOF from a replaced helper cannot clobber
+/// a newer helper's pipes or steal its pending request.
 private final class StatsHelper: @unchecked Sendable {
     static let shared = StatsHelper()
 
     private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.semono.app.statshelper", qos: .utility)
     private var process: Process?
     private var writeHandle: FileHandle?
     private var readHandle: FileHandle?
     private var pending: CheckedContinuation<String, Never>?
+    private var pendingTimer: DispatchSourceTimer?
     private var buffer = Data()
     private let logger = Logger(subsystem: "com.semono.app", category: "stats_helper")
     private var warnedSpawn = false
@@ -617,16 +596,45 @@ private final class StatsHelper: @unchecked Sendable {
     /// Sends one request line and returns the response line. Returns ""
     /// when the helper cannot be launched, times out, or dies.
     func query(_ name: String, timeout: TimeInterval = 2.0) async -> String {
-        await withTaskGroup(of: String.self) { group in
-            group.addTask { await self.performQuery(name) }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(timeout))
-                self.handleTimeout()
-                return ""
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if process == nil || !(process?.isRunning ?? false) {
+                spawnLocked()
             }
-            guard let first = await group.next() else { return "" }
-            group.cancelAll()
-            return first
+            guard let proc = process, proc.isRunning, pending == nil else {
+                if process == nil {
+                    warnOnce(flag: &warnedSpawn,
+                             message: "stats_helper could not be launched; GPU/power/disk will read 0")
+                }
+                lock.unlock()
+                cont.resume(returning: "")
+                return
+            }
+            pending = cont
+
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + timeout)
+            timer.setEventHandler { [weak self] in
+                self?.handleTimeout(timer: timer)
+            }
+            pendingTimer = timer
+            timer.resume()
+
+            do {
+                try writeHandle?.write(contentsOf: Data((name + "\n").utf8))
+                lock.unlock()
+            } catch {
+                // The helper died between the running check and the write.
+                // Drop the request and the timer; kill the helper so the
+                // EOF handler frees the pipe state, and the next query
+                // respawns a fresh process.
+                pendingTimer = nil
+                pending = nil
+                lock.unlock()
+                timer.cancel()
+                killHelper(proc)
+                cont.resume(returning: "")
+            }
         }
     }
 
@@ -642,33 +650,38 @@ private final class StatsHelper: @unchecked Sendable {
         buffer = Data()
         let cont = pending
         pending = nil
+        let timer = pendingTimer
+        pendingTimer = nil
         lock.unlock()
-        proc?.terminate()
+        timer?.cancel()
+        killHelper(proc)
         cont?.resume(returning: "")
     }
 
-    private func performQuery(_ name: String) async -> String {
-        await withCheckedContinuation { cont in
-            lock.lock()
-            if process == nil || !(process?.isRunning ?? false) {
-                spawnLocked()
-            }
-            let canServe = (process?.isRunning ?? false) && pending == nil
-            guard canServe else {
-                if process == nil {
-                    warnOnce(flag: &warnedSpawn,
-                             message: "stats_helper could not be launched; GPU/power/disk will read 0")
-                }
-                lock.unlock()
-                cont.resume(returning: "")
-                return
-            }
-            pending = cont
+    /// Timeout path: abandon the request and kill the helper. The EOF
+    /// handler observes the termination and frees the pipe state. A stale
+    /// timer (a response arrived first, or a newer request owns the slot)
+    /// is ignored.
+    private func handleTimeout(timer: DispatchSourceTimer) {
+        lock.lock()
+        guard pendingTimer === timer else {
             lock.unlock()
-            if let data = (name + "\n").data(using: .utf8) {
-                try? writeHandle?.write(contentsOf: data)
-            }
+            return
         }
+        pendingTimer = nil
+        let proc = process
+        let cont = pending
+        let alive = (proc?.isRunning ?? false) && cont != nil
+        if alive {
+            pending = nil
+        }
+        lock.unlock()
+        timer.cancel()
+        guard alive else { return }
+        warnOnce(flag: &warnedHang,
+                 message: "stats_helper did not answer in time; restarting it")
+        killHelper(proc)
+        cont?.resume(returning: "")
     }
 
     private func spawnLocked() {
@@ -702,6 +715,11 @@ private final class StatsHelper: @unchecked Sendable {
         }
 
         process = task
+        // Reaps the child on exit so a killed helper never lingers as a
+        // zombie (the pipe's EOF is delivered by the kernel regardless).
+        task.terminationHandler = { proc in
+            proc.waitUntilExit()
+        }
         writeHandle = input.fileHandleForWriting
         readHandle = out.fileHandleForReading
         warnedSpawn = false
@@ -711,8 +729,14 @@ private final class StatsHelper: @unchecked Sendable {
             let data = handle.availableData
             self.lock.lock()
             if data.isEmpty {
-                // EOF: the helper died (or was terminated). Release the
-                // request; the next query respawns it.
+                // EOF: the helper died (or was terminated). Only tear down
+                // if this handle still belongs to the current process; a
+                // stale EOF from a replaced helper must not disturb the
+                // newer one or its pending request.
+                guard let proc = self.process, proc === task else {
+                    self.lock.unlock()
+                    return
+                }
                 handle.readabilityHandler = nil
                 self.process = nil
                 self.readHandle = nil
@@ -720,7 +744,10 @@ private final class StatsHelper: @unchecked Sendable {
                 self.buffer = Data()
                 let cont = self.pending
                 self.pending = nil
+                let timer = self.pendingTimer
+                self.pendingTimer = nil
                 self.lock.unlock()
+                timer?.cancel()
                 cont?.resume(returning: "")
                 return
             }
@@ -731,7 +758,10 @@ private final class StatsHelper: @unchecked Sendable {
                 self.buffer = Data(self.buffer[(nl + 1)...])
                 let cont = self.pending
                 self.pending = nil
+                let timer = self.pendingTimer
+                self.pendingTimer = nil
                 self.lock.unlock()
+                timer?.cancel()
                 cont?.resume(returning: line)
             } else {
                 self.lock.unlock()
@@ -739,22 +769,10 @@ private final class StatsHelper: @unchecked Sendable {
         }
     }
 
-    /// Timeout path: abandon the request and kill the helper. The EOF
-    /// handler observes the termination and frees the pipe state.
-    private func handleTimeout() {
-        lock.lock()
-        let proc = process
-        let cont = pending
-        let alive = (proc?.isRunning ?? false) && cont != nil
-        if alive {
-            pending = nil
-        }
-        lock.unlock()
-        guard alive else { return }
-        warnOnce(flag: &warnedHang,
-                 message: "stats_helper did not answer in time; restarting it")
-        proc?.terminate()
-        cont?.resume(returning: "")
+    /// Terminates the helper. The spawn-time `terminationHandler` reaps it.
+    private func killHelper(_ proc: Process?) {
+        guard let proc, proc.isRunning else { return }
+        proc.terminate()
     }
 
     private func warnOnce(flag: inout Bool, message: String) {

@@ -6,6 +6,7 @@ import IOKit
 //     gpu    -> "0" ... "100"   (percent)
 //     power  -> milliwatts      (AppleSmartBattery PowerTelemetryData SystemLoad)
 //     disk   -> "readBytes writeBytes"  (aggregated across ALL block storage drivers)
+//     all    -> "gpuPercent mW readBytes writeBytes"  (the three above in one pass)
 //
 // Prints exactly one response line and flushes. Exits when stdin closes
 // (the parent app quitting closes the pipe, so the helper self-cleans).
@@ -92,6 +93,7 @@ while let line = readLine() {
     case "gpu":   print(gpuUsage())
     case "power": print(powerLoad())
     case "disk":  print(diskBytes())
+    case "all":   print("\(gpuUsage()) \(powerLoad()) \(diskBytes())")
     default:      print("0")
     }
     fflush(stdout)

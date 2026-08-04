@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        pruneLegacyDefaults()
         registerFont()
         setupStatusBar()
         showHUD()
@@ -51,6 +52,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reposition()
     }
 
+    /// Removes preference keys left behind by features that no longer exist
+    /// (adaptive sleep, pre-1.5 window keys), so the preferences file stays
+    /// tidy across upgrades.
+    private func pruneLegacyDefaults() {
+        let legacyKeys = [
+            "adaptiveSleep", "sleepSensitivity", "sleepHysteresis", "sleepInterval",
+            "hideInFullscreen", "hudPosition",
+        ]
+        for key in legacyKeys {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
     private func syncLoginItemState() {
         SettingsStore.shared.launchAtLogin = SMAppService.mainApp.status == .enabled
     }
@@ -62,7 +76,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         .merge(with: metrics.$memoryUsage.map { _ in })
         .merge(with: metrics.$powerUsage.map { _ in })
-        .merge(with: metrics.$isSleeping.map { _ in })
         .merge(with: SettingsStore.shared.objectWillChange)
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.updateStatusBarTitle() }
@@ -90,8 +103,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - HUD Window
 
+    /// The screen the user is most likely looking at: the one hosting the
+    /// key window, else the one under the pointer, else the first screen.
+    private var preferredScreen: NSScreen? {
+        if let keyScreen = NSApp.keyWindow?.screen { return keyScreen }
+        let mouse = NSEvent.mouseLocation
+        if let mouseScreen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) {
+            return mouseScreen
+        }
+        return NSScreen.screens.first
+    }
+
     private func showHUD() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let screen = preferredScreen else { return }
         let frame = hudFrame(for: screen)
 
         let w = NSWindow(
@@ -103,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = false
+        w.animationBehavior = .none
         w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         w.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
         applyFullscreenBehavior(SettingsStore.shared.showInFullscreen)
@@ -132,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func reposition() {
         guard let w = window else { return }
-        let screen = w.screen ?? NSScreen.main ?? NSScreen.screens.first
+        let screen = w.screen ?? preferredScreen
         guard let screen else { return }
         w.setFrame(hudFrame(for: screen), display: true, animate: false)
     }
@@ -222,11 +247,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let view = menubarView,
               text != view.displayText || type != view.displayType
-                || metrics.isSleeping != view.isSleeping
         else { return }
         view.displayText = text
         view.displayType = type
-        view.isSleeping = metrics.isSleeping
         let width = max(28, view.fittingWidth)
         if statusItem?.length != width {
             statusItem?.length = width

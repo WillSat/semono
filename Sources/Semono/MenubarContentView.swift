@@ -4,8 +4,6 @@ import AppKit
 /// subviews) means no tracking areas or cursor rects live in the menu bar
 /// region, and updates only invalidate the layer instead of re-snapshotting
 /// AppKit text views every tick.
-///
-/// In adaptive-sleep mode the readout collapses to a single leaf icon.
 final class MenubarContentView: NSView {
     var displayText: String = "" {
         didSet {
@@ -17,26 +15,6 @@ final class MenubarContentView: NSView {
             if displayType != oldValue { needsDisplay = true }
         }
     }
-
-    /// Adaptive-sleep indicator: the readout collapses to a leaf icon.
-    var isSleeping: Bool = false {
-        didSet {
-            if isSleeping != oldValue { needsDisplay = true }
-        }
-    }
-
-    /// Menu-bar standard icon size (matches other status icons).
-    private static let leafSize: CGFloat = 18
-
-    /// Built once instead of per draw.
-    private static let leaf: NSImage? = {
-        let config = NSImage.SymbolConfiguration(pointSize: leafSize, weight: .regular)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor.labelColor]))
-        return NSImage(
-            systemSymbolName: "leaf.fill",
-            accessibilityDescription: "Sleeping"
-        )?.withSymbolConfiguration(config)
-    }()
 
     private var valueAttrs: [NSAttributedString.Key: Any] {
         [
@@ -52,12 +30,8 @@ final class MenubarContentView: NSView {
         ]
     }
 
-    /// Width required by the currently displayed content. Sleeping collapses
-    /// to just the leaf icon.
+    /// Width required by the currently displayed content.
     var fittingWidth: CGFloat {
-        if isSleeping {
-            return ceil(Self.leafSize) + 8
-        }
         let valueW = NSAttributedString(string: displayText, attributes: valueAttrs).size().width
         let typeW = NSAttributedString(string: displayType, attributes: typeAttrs).size().width
         return ceil(max(valueW, typeW)) + 10
@@ -69,19 +43,6 @@ final class MenubarContentView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-
-        if isSleeping {
-            if let leaf = Self.leaf {
-                let size = Self.leafSize
-                leaf.draw(in: NSRect(
-                    x: (bounds.width - size) / 2,
-                    y: (bounds.height - size) / 2,
-                    width: size,
-                    height: size
-                ))
-            }
-            return
-        }
 
         let value = NSAttributedString(string: displayText, attributes: valueAttrs)
         let type = NSAttributedString(string: displayType, attributes: typeAttrs)
