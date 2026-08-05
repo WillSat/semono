@@ -7,45 +7,93 @@ import AppKit
 final class MenubarContentView: NSView {
     var displayText: String = "" {
         didSet {
-            if displayText != oldValue { needsDisplay = true }
+            if displayText != oldValue {
+                needsDisplay = true
+                invalidateWidths()
+            }
         }
     }
     var displayType: String = "CPU" {
         didSet {
-            if displayType != oldValue { needsDisplay = true }
+            if displayType != oldValue {
+                needsDisplay = true
+                invalidateWidths()
+            }
         }
     }
 
-    private var valueAttrs: [NSAttributedString.Key: Any] {
-        [
-            .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold),
-            .foregroundColor: NSColor.labelColor,
-        ]
+    // Fonts are created once and held for the app's lifetime. Realizing a
+    // font lazily during measurement (CTLineCreateWithAttributedString) can
+    // crash CoreText under memory pressure — it built a font-trait dictionary
+    // containing nil and aborted the process — so the CTFont objects are
+    // never realized at layout time.
+    private static let valueFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+    private static let typeFont = NSFont.systemFont(ofSize: 6.5, weight: .medium)
+
+    // Text uses the system label color, resolved against the effective
+    // appearance so it follows the macOS light/dark menu bar automatically.
+    // A dynamic color is resolved to a concrete value here instead of being
+    // handed to CoreText unresolved; color never enters the measurement
+    // path, and the draw path gets the appearance-correct value.
+    private var textColor: NSColor
+
+    // Measured widths are cached and only recomputed when the displayed text
+    // or type changes, so AppKit layout never re-runs text measurement.
+    private var valueWidth: CGFloat?
+    private var typeWidth: CGFloat?
+
+    override init(frame frameRect: NSRect) {
+        textColor = Self.resolvedLabelColor(for: NSApp.effectiveAppearance)
+        super.init(frame: frameRect)
     }
 
-    private var typeAttrs: [NSAttributedString.Key: Any] {
-        [
-            .font: NSFont.systemFont(ofSize: 6.5, weight: .medium),
-            .foregroundColor: NSColor.labelColor,
-        ]
+    required init?(coder: NSCoder) {
+        textColor = Self.resolvedLabelColor(for: NSApp.effectiveAppearance)
+        super.init(coder: coder)
+    }
+
+    /// Font-only attributes for measurement — no color involved in sizing.
+    private var measureValueAttrs: [NSAttributedString.Key: Any] {
+        [.font: Self.valueFont]
+    }
+
+    private var measureTypeAttrs: [NSAttributedString.Key: Any] {
+        [.font: Self.typeFont]
+    }
+
+    private var drawValueAttrs: [NSAttributedString.Key: Any] {
+        [.font: Self.valueFont, .foregroundColor: textColor]
+    }
+
+    private var drawTypeAttrs: [NSAttributedString.Key: Any] {
+        [.font: Self.typeFont, .foregroundColor: textColor]
     }
 
     /// Width required by the currently displayed content.
     var fittingWidth: CGFloat {
-        let valueW = NSAttributedString(string: displayText, attributes: valueAttrs).size().width
-        let typeW = NSAttributedString(string: displayType, attributes: typeAttrs).size().width
-        return ceil(max(valueW, typeW)) + 10
+        if valueWidth == nil {
+            valueWidth = NSAttributedString(string: displayText, attributes: measureValueAttrs).size().width
+        }
+        if typeWidth == nil {
+            typeWidth = NSAttributedString(string: displayType, attributes: measureTypeAttrs).size().width
+        }
+        return ceil(max(valueWidth ?? 0, typeWidth ?? 0)) + 10
     }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: fittingWidth, height: NSStatusBar.system.thickness)
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        textColor = Self.resolvedLabelColor(for: effectiveAppearance)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        let value = NSAttributedString(string: displayText, attributes: valueAttrs)
-        let type = NSAttributedString(string: displayType, attributes: typeAttrs)
+        let value = NSAttributedString(string: displayText, attributes: drawValueAttrs)
+        let type = NSAttributedString(string: displayType, attributes: drawTypeAttrs)
         let valueSize = value.size()
         let typeSize = type.size()
 
@@ -62,5 +110,22 @@ final class MenubarContentView: NSView {
         if let menu = self.menu {
             menu.popUp(positioning: nil, at: .zero, in: self)
         }
+    }
+
+    private func invalidateWidths() {
+        valueWidth = nil
+        typeWidth = nil
+    }
+
+    /// Resolves the dynamic label color against a specific appearance so the
+    /// text follows the macOS light/dark menu bar while remaining a concrete
+    /// (non-dynamic) color for drawing.
+    private static func resolvedLabelColor(for appearance: NSAppearance) -> NSColor {
+        var resolved = NSColor.labelColor
+        appearance.performAsCurrentDrawingAppearance {
+            let color = NSColor.labelColor
+            resolved = color.usingColorSpace(.deviceRGB) ?? color
+        }
+        return resolved
     }
 }
