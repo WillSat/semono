@@ -30,6 +30,12 @@ struct SettingsView: View {
     @ObservedObject var settings = SettingsStore.shared
     @ObservedObject var locale = LocaleManager.shared
     @State private var selectedTab: SettingsTab = .display
+    @State private var showLoginError = false
+    @State private var loginErrorMessage = ""
+    /// Guards the launch-at-login toggle against its own failure rollback:
+    /// when registration fails the toggle is reverted, and the change fired
+    /// by that revert must not run the register/unregister flow again.
+    @State private var pendingLoginChange: Bool?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -53,6 +59,11 @@ struct SettingsView: View {
         }
         .tabViewStyle(.sidebarAdaptable)
         .toolbar(removing: .sidebarToggle)
+        .alert(locale.localized("Launch at Login Failed"), isPresented: $showLoginError) {
+            Button("OK") {}
+        } message: {
+            Text("\(locale.localized("Login item failed to register. It may require a properly signed build."))\n\(loginErrorMessage)")
+        }
     }
 
     // MARK: - Display
@@ -150,7 +161,30 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 150)
                 }
-                Toggle(locale.localized("Launch at Login"), isOn: loginBinding)
+                Toggle(locale.localized("Launch at Login"), isOn: $settings.launchAtLogin)
+                    .onChange(of: settings.launchAtLogin) { _, newValue in
+                        guard pendingLoginChange != newValue else { return }
+                        pendingLoginChange = newValue
+                        do {
+                            if newValue {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                            pendingLoginChange = nil
+                        } catch {
+                            // Registration is rejected on ad-hoc-signed
+                            // builds; revert the toggle to the real status
+                            // and surface the failure instead of staying
+                            // silent. (SMAppService errors are cryptic
+                            // SMAppServiceErrorDomain codes, hence the hint.)
+                            let status = SMAppService.mainApp.status == .enabled
+                            pendingLoginChange = status
+                            settings.launchAtLogin = status
+                            loginErrorMessage = error.localizedDescription
+                            showLoginError = true
+                        }
+                    }
             } header: {
                 SettingsSectionHeader(icon: "gearshape", title: locale.localized("General"))
             }
@@ -185,24 +219,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-    }
-
-    private var loginBinding: Binding<Bool> {
-        Binding(
-            get: { settings.launchAtLogin },
-            set: { newValue in
-                do {
-                    if newValue {
-                        try SMAppService.mainApp.register()
-                    } else {
-                        try SMAppService.mainApp.unregister()
-                    }
-                    settings.launchAtLogin = newValue
-                } catch {
-                    settings.launchAtLogin = SMAppService.mainApp.status == .enabled
-                }
-            }
-        )
     }
 }
 

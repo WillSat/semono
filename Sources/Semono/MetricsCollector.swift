@@ -143,8 +143,6 @@ struct Sampler: Sendable {
     private var prevDiskWriteBytes: UInt64 = 0
     private var prevDiskTime: Date = .now
     private var hasPrevDisk: Bool = false
-    private var sampleCount: Int = 0
-    private var cachedPower: Double = 0
     private var freqCacheDate = Date.distantPast
     private var cachedFreq: [Double] = []
     private var connCacheDate = Date.distantPast
@@ -163,8 +161,8 @@ struct Sampler: Sendable {
         let wantsDisk = flags.collectStorage
         // When two or more helper-backed metrics are live, a single "all"
         // request serves them in one pipe round-trip and one IOKit pass.
-        // A lone metric keeps its dedicated query (and the previous
-        // every-second-tick staggering for power/disk).
+        // A lone metric keeps its dedicated query; the resident helper makes
+        // per-tick reads cheap, so power/disk are never staggered.
         if (wantsGPU ? 1 : 0) + (wantsPower ? 1 : 0) + (wantsDisk ? 1 : 0) >= 2 {
             let (gpu, power, disk) = await Self.readAll()
             if wantsGPU { s.gpuUsage = gpu }
@@ -177,10 +175,9 @@ struct Sampler: Sendable {
                 s.gpuUsage = await Self.readGPU()
             }
             if wantsPower {
-                if sampleCount % 2 == 0 { cachedPower = await Self.readPower() }
-                s.powerUsage = cachedPower
+                s.powerUsage = await Self.readPower()
             }
-            if wantsDisk && sampleCount % 2 == 1 {
+            if wantsDisk {
                 (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(await Self.readDiskBytes())
             }
         }
@@ -206,7 +203,11 @@ struct Sampler: Sendable {
 
         if flags.collectNetwork {
             (s.downloadSpeed, s.uploadSpeed) = readNetwork()
-            if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval {
+            // The first network sample resolves the real primary interface
+            // right away instead of trusting the "en0" default (which is
+            // wrong on machines whose primary interface is another name)
+            // until the 15 s cache expires.
+            if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval || !hasPrevNet {
                 (cachedConnType, cachedRSSI, cachedInterfaceName) = Self.readConnectionInfo()
                 connCacheDate = now
             }
@@ -214,7 +215,6 @@ struct Sampler: Sendable {
             s.wifiRSSI = cachedRSSI
         }
 
-        sampleCount &+= 1
         return s
     }
 
@@ -334,17 +334,33 @@ struct Sampler: Sendable {
 
         var swapSize = 0
         sysctlbyname("vm.swapusage", nil, &swapSize, nil, 0)
-        guard swapSize > 0 else { return (Int(level), 0, 0) }
+        guard swapSize > 0 else { return (normalizePressure(Int(level)), 0, 0) }
 
         var buf = [CChar](repeating: 0, count: swapSize)
         var outSize = swapSize
         guard sysctlbyname("vm.swapusage", &buf, &outSize, nil, 0) == 0, outSize > 0 else {
-            return (Int(level), 0, 0)
+            return (normalizePressure(Int(level)), 0, 0)
         }
 
         let (totalBytes, usedBytes) = SwapParser.usage(from: buf, size: outSize)
         let ratio: Double = totalBytes > 0 ? min(1.0, Double(usedBytes) / Double(totalBytes)) : 0
-        return (Int(level), usedBytes, ratio)
+        return (normalizePressure(Int(level)), usedBytes, ratio)
+    }
+
+    /// Maps a raw `kern.memorystatus_vm_pressure_level` sysctl value to the
+    /// canonical 0..3 range (normal/warning/urgent/critical). xnu documents
+    /// contiguous 0..3, but some macOS builds report 1 = normal and use 4 for
+    /// critical, so the mapping is explicit instead of assumed contiguous.
+    /// Downstream consumers (PRS bar, N/M/H/C labels) only ever see 0..3.
+    private static func normalizePressure(_ raw: Int) -> Int {
+        switch raw {
+        case 0: return 0
+        case 1: return 1
+        case 2: return 2
+        case 3: return 3
+        case 4: return 3 // alternate builds report 4 = critical
+        default: return min(3, max(0, raw))
+        }
     }
 
     // MARK: - Thermal
@@ -586,55 +602,122 @@ private final class StatsHelper: @unchecked Sendable {
     private var readHandle: FileHandle?
     private var pending: CheckedContinuation<String, Never>?
     private var pendingTimer: DispatchSourceTimer?
+    /// Identity of the in-flight request (CheckedContinuation is a struct, so
+    /// ownership cannot be compared by identity). Lets the cancellation
+    /// handler and the post-registration re-check tell "our" request apart
+    /// from one that was already claimed or replaced.
+    private var pendingToken: QueryToken?
     private var buffer = Data()
     private let logger = Logger(subsystem: "com.semono.app", category: "stats_helper")
     private var warnedSpawn = false
     private var warnedHang = false
+    /// When the helper died (crash, kill, EOF). A fresh death suppresses
+    /// respawns for a short backoff so a helper that dies on launch is not
+    /// respawned — and logged about — on every tick.
+    private var lastHelperDeath: Date?
+    private static let respawnBackoff: TimeInterval = 10
 
     private init() {}
 
     /// Sends one request line and returns the response line. Returns ""
-    /// when the helper cannot be launched, times out, or dies.
+    /// when the helper cannot be launched, times out, dies, or the calling
+    /// task is cancelled.
     func query(_ name: String, timeout: TimeInterval = 2.0) async -> String {
-        await withCheckedContinuation { cont in
-            lock.lock()
-            if process == nil || !(process?.isRunning ?? false) {
-                spawnLocked()
-            }
-            guard let proc = process, proc.isRunning, pending == nil else {
-                if process == nil {
-                    warnOnce(flag: &warnedSpawn,
-                             message: "stats_helper could not be launched; GPU/power/disk will read 0")
+        let token = QueryToken()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                lock.lock()
+                if process == nil || !(process?.isRunning ?? false) {
+                    let inBackoff: Bool
+                    if let death = lastHelperDeath {
+                        inBackoff = Date().timeIntervalSince(death) < Self.respawnBackoff
+                    } else {
+                        inBackoff = false
+                    }
+                    if !inBackoff {
+                        spawnLocked()
+                    } else {
+                        // The helper just died; skip the spawn this tick.
+                        lock.unlock()
+                        cont.resume(returning: "")
+                        return
+                    }
                 }
+                guard let proc = process, proc.isRunning, pending == nil else {
+                    if process == nil {
+                        warnOnce(flag: &warnedSpawn,
+                                 message: "stats_helper could not be launched; GPU/power/disk will read 0")
+                    }
+                    lock.unlock()
+                    cont.resume(returning: "")
+                    return
+                }
+                pending = cont
+                pendingToken = token
+
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                timer.schedule(deadline: .now() + timeout)
+                timer.setEventHandler { [weak self] in
+                    self?.handleTimeout(timer: timer)
+                }
+                pendingTimer = timer
+                timer.resume()
+
+                // The cancellation handler may have run before the
+                // continuation was registered; re-check so a cancelled task
+                // never stays suspended until the timeout. If the handler
+                // already claimed the request (token gone), it also resumed
+                // the continuation — do not resume twice.
+                guard !Task.isCancelled else {
+                    if pendingToken === token {
+                        pending = nil
+                        pendingToken = nil
+                        pendingTimer = nil
+                        lock.unlock()
+                        timer.cancel()
+                        cont.resume(returning: "")
+                    } else {
+                        lock.unlock()
+                    }
+                    return
+                }
+
+                do {
+                    try writeHandle?.write(contentsOf: Data((name + "\n").utf8))
+                    lock.unlock()
+                } catch {
+                    // The helper died between the running check and the write.
+                    // Drop the request and the timer; kill the helper so the
+                    // EOF handler frees the pipe state, and the next query
+                    // respawns a fresh process.
+                    pendingTimer = nil
+                    pending = nil
+                    pendingToken = nil
+                    lock.unlock()
+                    timer.cancel()
+                    killHelper(proc)
+                    cont.resume(returning: "")
+                }
+            }
+        } onCancel: {
+            // Resumes an in-flight request promptly when the caller is
+            // cancelled instead of leaving the task suspended until the
+            // timeout. Only claims the request while it is still ours. The
+            // helper is left running: its late response is dropped (pending
+            // is nil), so the line protocol stays in sync.
+            lock.lock()
+            guard pendingToken === token else {
                 lock.unlock()
-                cont.resume(returning: "")
                 return
             }
-            pending = cont
-
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.schedule(deadline: .now() + timeout)
-            timer.setEventHandler { [weak self] in
-                self?.handleTimeout(timer: timer)
-            }
-            pendingTimer = timer
-            timer.resume()
-
-            do {
-                try writeHandle?.write(contentsOf: Data((name + "\n").utf8))
-                lock.unlock()
-            } catch {
-                // The helper died between the running check and the write.
-                // Drop the request and the timer; kill the helper so the
-                // EOF handler frees the pipe state, and the next query
-                // respawns a fresh process.
-                pendingTimer = nil
-                pending = nil
-                lock.unlock()
-                timer.cancel()
-                killHelper(proc)
-                cont.resume(returning: "")
-            }
+            let cont = pending
+            pending = nil
+            pendingToken = nil
+            let timer = pendingTimer
+            pendingTimer = nil
+            lock.unlock()
+            timer?.cancel()
+            cont?.resume(returning: "")
         }
     }
 
@@ -650,6 +733,7 @@ private final class StatsHelper: @unchecked Sendable {
         buffer = Data()
         let cont = pending
         pending = nil
+        pendingToken = nil
         let timer = pendingTimer
         pendingTimer = nil
         lock.unlock()
@@ -674,6 +758,7 @@ private final class StatsHelper: @unchecked Sendable {
         let alive = (proc?.isRunning ?? false) && cont != nil
         if alive {
             pending = nil
+            pendingToken = nil
         }
         lock.unlock()
         timer.cancel()
@@ -722,8 +807,6 @@ private final class StatsHelper: @unchecked Sendable {
         }
         writeHandle = input.fileHandleForWriting
         readHandle = out.fileHandleForReading
-        warnedSpawn = false
-        warnedHang = false
         readHandle?.readabilityHandler = { [weak self] handle in
             guard let self else { return }
             let data = handle.availableData
@@ -737,6 +820,7 @@ private final class StatsHelper: @unchecked Sendable {
                     self.lock.unlock()
                     return
                 }
+                self.lastHelperDeath = Date()
                 handle.readabilityHandler = nil
                 self.process = nil
                 self.readHandle = nil
@@ -744,6 +828,7 @@ private final class StatsHelper: @unchecked Sendable {
                 self.buffer = Data()
                 let cont = self.pending
                 self.pending = nil
+                self.pendingToken = nil
                 let timer = self.pendingTimer
                 self.pendingTimer = nil
                 self.lock.unlock()
@@ -756,8 +841,13 @@ private final class StatsHelper: @unchecked Sendable {
                 let line = String(data: Data(self.buffer[..<nl]), encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 self.buffer = Data(self.buffer[(nl + 1)...])
+                // A real response means the helper is healthy again; re-arm
+                // the once-only warnings for a future failure episode.
+                self.warnedSpawn = false
+                self.warnedHang = false
                 let cont = self.pending
                 self.pending = nil
+                self.pendingToken = nil
                 let timer = self.pendingTimer
                 self.pendingTimer = nil
                 self.lock.unlock()
@@ -774,6 +864,11 @@ private final class StatsHelper: @unchecked Sendable {
         guard let proc, proc.isRunning else { return }
         proc.terminate()
     }
+
+    /// Reference-type identity token for an in-flight request; see
+    /// `pendingToken`. Carries no data, so it is safe to send across
+    /// isolation domains.
+    private final class QueryToken: @unchecked Sendable {}
 
     private func warnOnce(flag: inout Bool, message: String) {
         guard !flag else { return }

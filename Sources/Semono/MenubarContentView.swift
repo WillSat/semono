@@ -107,9 +107,20 @@ final class MenubarContentView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if let menu = self.menu {
-            menu.popUp(positioning: nil, at: .zero, in: self)
-        }
+        showMenu()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        showMenu()
+    }
+
+    /// Pops the menu up below the item. The status bar window uses a flipped
+    /// coordinate system, so `y = bounds.height + 5` places the menu's top
+    /// edge just beneath the item (`.zero` would anchor it over the item
+    /// itself and left-align it instead of centering under the readout).
+    private func showMenu() {
+        guard let menu else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 5), in: self)
     }
 
     private func invalidateWidths() {

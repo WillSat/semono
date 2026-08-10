@@ -30,10 +30,13 @@ final class SettingsStore: ObservableObject {
         for family in NSFontManager.shared.availableFontFamilies.sorted() {
             guard let members = NSFontManager.shared.availableMembers(ofFontFamily: family) else { continue }
             for m in members {
+                // Members are [PostScriptName, familyName, traits, weight]; the
+                // traits mask is not checked because `isFixedPitch` already
+                // covers the intent (a trait test like `== 5` would wrongly
+                // admit only the bold-italic member of each family).
                 guard let psName = m[0] as? String,
                       let font = NSFont(name: psName, size: 11),
-                      font.isFixedPitch,
-                      m[2] as? Int == 5
+                      font.isFixedPitch
                 else { continue }
                 fonts.append((psName, family))
                 break
