@@ -5,11 +5,11 @@ enum ColorScale {
     static let accent = Color(nsColor: NSColor(hex: 0x4FC3F7))
 
     private static let anchors: [(Double, NSColor)] = [
-        (0.0,  NSColor(hex: 0x4FC3F7).usingColorSpace(.sRGB)!),
-        (0.25, NSColor(hex: 0x66BB6A).usingColorSpace(.sRGB)!),
-        (0.5,  NSColor(hex: 0xFFEE58).usingColorSpace(.sRGB)!),
-        (0.75, NSColor(hex: 0xFFA726).usingColorSpace(.sRGB)!),
-        (1.0,  NSColor(hex: 0xEF5350).usingColorSpace(.sRGB)!),
+        (0.0,  NSColor(hex: 0x4FC3F7).usingColorSpace(.sRGB) ?? NSColor(hex: 0x4FC3F7)),
+        (0.25, NSColor(hex: 0x66BB6A).usingColorSpace(.sRGB) ?? NSColor(hex: 0x66BB6A)),
+        (0.5,  NSColor(hex: 0xFFEE58).usingColorSpace(.sRGB) ?? NSColor(hex: 0xFFEE58)),
+        (0.75, NSColor(hex: 0xFFA726).usingColorSpace(.sRGB) ?? NSColor(hex: 0xFFA726)),
+        (1.0,  NSColor(hex: 0xEF5350).usingColorSpace(.sRGB) ?? NSColor(hex: 0xEF5350)),
     ]
 
     /// Precomputed 0–100% palette, built once from the anchors. Lookup is a
@@ -47,9 +47,14 @@ enum ColorScale {
         return color(for: t)
     }
 
+    /// 0..1 strength for an RSSI value. RSSI is negative dBm where -30 is
+    /// excellent and -90 is unusable; 0 means "unavailable" and maps to 0.
+    static func normalizedRSSI(_ rssi: Int) -> Double {
+        Double(max(30, min(90, abs(rssi))) - 30) / 60.0
+    }
+
     static func color(forRSSI rssi: Int) -> Color {
-        let norm = Double(max(30, min(90, abs(rssi))) - 30) / 60.0
-        return color(for: norm)
+        color(for: normalizedRSSI(rssi))
     }
 
 }

@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import ServiceManagement
 import Combine
+import os
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -13,6 +14,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let metrics = MetricsCollector()
     private var saveFrameTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
+
+    /// Debounce for persisting the HUD frame after drag/resize ends.
+    private static let frameSaveDebounce: TimeInterval = 0.5
+    /// Delay before the first frame save so the initial auto-size settles.
+    private static let initialFrameSaveDelay: TimeInterval = 0.1
+    /// Minimum status bar item width so the readout stays comfortably clickable.
+    private static let statusBarMinWidth: CGFloat = 28
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -32,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        #if DEBUG
+        // Screenshot-automation hook: opens both windows, then quits. Debug
+        // builds only, so it can never leak into a shipped bundle.
         if CommandLine.arguments.contains("--open-windows") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 NSApp.activate()
@@ -42,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
             }
         }
+        #endif
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
@@ -65,8 +77,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// SMAppService.mainApp.status is an XPC round-trip; resolve it off the
+    /// main thread and publish the result back.
     private func syncLoginItemState() {
-        SettingsStore.shared.launchAtLogin = SMAppService.mainApp.status == .enabled
+        Task.detached(priority: .utility) {
+            let enabled = SMAppService.mainApp.status == .enabled
+            await MainActor.run {
+                SettingsStore.shared.launchAtLogin = enabled
+            }
+        }
     }
 
     private func observeMetrics() {
@@ -76,25 +95,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         .merge(with: metrics.$memoryUsage.map { _ in })
         .merge(with: metrics.$powerUsage.map { _ in })
-        .merge(with: SettingsStore.shared.objectWillChange)
+        .merge(with: NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).map { _ in })
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.updateStatusBarTitle() }
         .store(in: &cancellables)
     }
 
+    // MARK: - Fullscreen behavior sync
+
+    /// Reacts to settings changes after they are written. `objectWillChange`
+    /// fires *before* the write, so a sink reading the property there still
+    /// sees the old value; the post-write `didChangeNotification` (the same
+    /// mechanism LocaleManager relies on) avoids that off-by-one-event lag.
+    private var appliedFullscreenBehavior: Bool?
+
     private func observeSettings() {
-        var lastFullscreen = SettingsStore.shared.showInFullscreen
-        SettingsStore.shared.objectWillChange
-            .sink { [weak self] _ in
-                let now = SettingsStore.shared.showInFullscreen
-                guard now != lastFullscreen else { return }
-                lastFullscreen = now
-                self?.applyFullscreenBehavior(now)
-            }
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.syncFullscreenBehavior() }
             .store(in: &cancellables)
     }
 
+    private func syncFullscreenBehavior() {
+        let enabled = SettingsStore.shared.showInFullscreen
+        guard appliedFullscreenBehavior != enabled else { return }
+        applyFullscreenBehavior(enabled)
+    }
+
     private func applyFullscreenBehavior(_ enabled: Bool) {
+        appliedFullscreenBehavior = enabled
         guard let w = window else { return }
         w.collectionBehavior.remove(.fullScreenAuxiliary)
         w.collectionBehavior.remove(.fullScreenNone)
@@ -150,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.makeKeyAndOrderFront(nil)
         window = w
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak w] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.initialFrameSaveDelay) { [weak self, weak w] in
             self?.scheduleSaveFrame(w)
         }
     }
@@ -164,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func scheduleSaveFrame(_ w: NSWindow?) {
         saveFrameTimer?.invalidate()
-        saveFrameTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self, weak w] _ in
+        saveFrameTimer = Timer.scheduledTimer(withTimeInterval: Self.frameSaveDebounce, repeats: false) { [weak self, weak w] _ in
             guard let self, let w else { return }
             Task { @MainActor in self.saveFrame(w) }
         }
@@ -185,13 +214,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// saved frame's screen is gone.
     private func hudFrame(for screen: NSScreen) -> NSRect {
         let store = SettingsStore.shared
-        let hasSaved = store.hudHasSavedPosition || (store.hudX != -1 && store.hudY != -1)
+        let defaults = SettingsStore.Defaults.self
+        let hasSaved = store.hudHasSavedPosition
+            || (store.hudX != defaults.hudX && store.hudY != defaults.hudY)
         guard hasSaved, store.hudWidth > 0, store.hudHeight > 0 else {
-            return DockDetector.defaultFrame(for: screen)
+            return HUDFrame.defaultFrame(for: screen)
         }
         let frame = NSRect(x: store.hudX, y: store.hudY, width: store.hudWidth, height: store.hudHeight)
         guard NSScreen.screens.contains(where: { $0.frame.intersects(frame) }) else {
-            return DockDetector.defaultFrame(for: screen)
+            return HUDFrame.defaultFrame(for: screen)
         }
         return frame
     }
@@ -228,29 +259,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusBarTitle() {
-        let metric = SettingsStore.shared.statusBarMetric
-        let text: String
-        let type: String
-        switch metric {
-        case "memory":
-            text = "\(Int(metrics.memoryUsage * 100))%"
-            type = "MEM"
-        case "gpu":
-            text = "\(Int(metrics.gpuUsage * 100))%"
-            type = "GPU"
-        case "pwr":
-            text = String(format: "%.1f", metrics.powerUsage)
-            type = "PWR"
-        default:
-            text = "\(Int(metrics.cpuUsage * 100))%"
-            type = "CPU"
-        }
+        let metric = StatusBarMetric(rawValue: SettingsStore.shared.statusBarMetric) ?? .cpu
+        let text = metric.text(from: metrics)
+        let type = metric.label
         guard let view = menubarView,
               text != view.displayText || type != view.displayType
         else { return }
         view.displayText = text
         view.displayType = type
-        let width = max(28, view.fittingWidth)
+        let width = max(Self.statusBarMinWidth, view.fittingWidth)
         if statusItem?.length != width {
             statusItem?.length = width
         }
@@ -279,28 +296,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let url = Bundle.main.url(forResource: "DepartureMono-Regular", withExtension: "otf") else {
             return
         }
-        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        var error: Unmanaged<CFError>?
+        let registered = CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error)
+        if !registered {
+            // The HUD falls back to the monospaced system font; log the
+            // failure instead of letting it pass silently.
+            Logger(subsystem: "com.semono.app", category: "font")
+                .error("Departure Mono registration failed: \(String(describing: error?.takeRetainedValue().localizedDescription), privacy: .public)")
+        }
     }
 }
 
 // MARK: - Window Delegate
 
 private final class WindowDelegate: NSObject, NSWindowDelegate {
-    let onClose: (() -> Void)?
     let onMove: (() -> Void)?
     let onResize: (() -> Void)?
 
     init(
-        onClose: (() -> Void)? = nil,
         onMove: (() -> Void)? = nil,
         onResize: (() -> Void)? = nil
     ) {
-        self.onClose = onClose
         self.onMove = onMove
         self.onResize = onResize
     }
 
-    func windowWillClose(_ notification: Notification) { onClose?() }
     func windowDidMove(_ notification: Notification) { onMove?() }
     func windowDidResize(_ notification: Notification) { onResize?() }
 }

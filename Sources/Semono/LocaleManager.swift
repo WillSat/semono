@@ -22,16 +22,17 @@ final class LocaleManager: ObservableObject {
             object: UserDefaults.standard,
             queue: .main
         ) { [weak self] _ in
+            // Pre-filter before the actor hop: most defaults writes (HUD
+            // drag saves, sliders) never touch the language key.
+            let stored = UserDefaults.standard.string(forKey: "appLanguage") ?? Self.detectSystemLanguage()
             Task { @MainActor in
-                guard let self else { return }
-                let stored = UserDefaults.standard.string(forKey: "appLanguage") ?? Self.detectSystemLanguage()
-                guard stored != self.appLanguage else { return }
+                guard let self, stored != self.appLanguage else { return }
                 self.appLanguage = stored
             }
         }
     }
 
-    static func detectSystemLanguage() -> String {
+    nonisolated static func detectSystemLanguage() -> String {
         let lang = Locale.current.language.languageCode?.identifier ?? "en"
         return lang == "zh" ? "zh" : "en"
     }

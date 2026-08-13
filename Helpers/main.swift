@@ -1,15 +1,23 @@
 import Foundation
 import IOKit
+import Darwin
 
 // Resident stats daemon. Reads one request per line from stdin:
 //
-//     gpu    -> "0" ... "100"   (percent)
-//     power  -> milliwatts      (AppleSmartBattery PowerTelemetryData SystemLoad)
-//     disk   -> "readBytes writeBytes"  (aggregated across ALL block storage drivers)
-//     all    -> "gpuPercent mW readBytes writeBytes"  (the three above in one pass)
+//     gpu    -> "gpu 0..100"                        (percent)
+//     power  -> "power milliwatts"                  (AppleSmartBattery PowerTelemetryData SystemLoad)
+//     disk   -> "disk readBytes writeBytes"         (aggregated across ALL block storage drivers)
+//     all    -> "all gpuPercent mW readBytes writeBytes"
 //
+// Responses echo the request word, so the parent can tell a late response
+// (from a request it already cancelled) apart from the one it is waiting for.
 // Prints exactly one response line and flushes. Exits when stdin closes
 // (the parent app quitting closes the pipe, so the helper self-cleans).
+
+// If the parent closes stdout while stdin is still open, print() must fail
+// with an error instead of SIGPIPE killing this process — a signal death
+// would read as a spurious EOF plus a respawn backoff on the parent side.
+signal(SIGPIPE, SIG_IGN)
 
 // MARK: - GPU
 
@@ -31,6 +39,24 @@ func powerLoad() -> String {
           let load = tele["SystemLoad"] as? NSNumber
     else { return "0" }
     return load.stringValue
+}
+
+/// Power draw moves slowly, so it is cached briefly; at the 1 s refresh tier
+/// this halves the IOKit registry walks. GPU stays fresh (it flickers too
+/// fast to cache) and disk stays fresh (the parent derives rates from the
+/// counters' deltas, so a cached counter would misreport throughput).
+/// The request loop below is strictly single-threaded, so the cache needs no
+/// synchronization; top-level vars in a main file default to MainActor, so
+/// opt out explicitly.
+nonisolated(unsafe) var cachedPower = (value: "0", date: Date.distantPast)
+
+func powerLoadCached() -> String {
+    if Date().timeIntervalSince(cachedPower.date) < 2.0 {
+        return cachedPower.value
+    }
+    let value = powerLoad()
+    cachedPower = (value, Date())
+    return value
 }
 
 // MARK: - Disk
@@ -90,10 +116,10 @@ func firstServiceProperties(matchingService className: String) -> [String: Any]?
 
 while let line = readLine() {
     switch line {
-    case "gpu":   print(gpuUsage())
-    case "power": print(powerLoad())
-    case "disk":  print(diskBytes())
-    case "all":   print("\(gpuUsage()) \(powerLoad()) \(diskBytes())")
+    case "gpu":   print("gpu \(gpuUsage())")
+    case "power": print("power \(powerLoadCached())")
+    case "disk":  print("disk \(diskBytes())")
+    case "all":   print("all \(gpuUsage()) \(powerLoadCached()) \(diskBytes())")
     default:      print("0")
     }
     fflush(stdout)

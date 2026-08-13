@@ -63,10 +63,9 @@ struct DetailView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Picker("", selection: $settings.refreshInterval) {
-                    Text("1s").tag(1)
-                    Text("2s").tag(2)
-                    Text("3s").tag(3)
-                    Text("5s").tag(5)
+                    ForEach(SettingsStore.refreshOptions, id: \.self) { seconds in
+                        Text("\(seconds)s").tag(seconds)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -114,17 +113,18 @@ struct DetailView: View {
                 format: { String(format: "%.0f%%", $0 * 100) }
             )
 
-            if let last = history.snapshots.last, !last.perCoreCPU.isEmpty {
+            // Columns are maintained per-core by MetricsHistory so the charts
+            // reuse precomputed series instead of re-mapping the history for
+            // every core on every tick.
+            if !history.perCoreCPUColumns.isEmpty {
                 SectionHeader(locale.localized("Per Core"))
                 AdaptiveGrid {
-                    ForEach(0..<last.perCoreCPU.count, id: \.self) { i in
+                    ForEach(0..<history.perCoreCPUColumns.count, id: \.self) { i in
                         MetricChart(
                             title: "CPU \(i)",
                             icon: nil,
                             unit: "",
-                            values: history.snapshots.map { s in
-                                s.perCoreCPU.count > i ? s.perCoreCPU[i] : 0
-                            },
+                            values: history.perCoreCPUColumns[i],
                             maxY: 1.0,
                             format: { String(format: "%.0f%%", $0 * 100) },
                             compact: true
@@ -133,17 +133,15 @@ struct DetailView: View {
                 }
             }
 
-            if let last = history.snapshots.last, !last.perCoreFreqMHz.isEmpty {
+            if !history.perCoreFreqColumns.isEmpty {
                 SectionHeader(locale.localized("Frequency") + " (MHz)")
                 AdaptiveGrid {
-                    ForEach(0..<last.perCoreFreqMHz.count, id: \.self) { i in
+                    ForEach(0..<history.perCoreFreqColumns.count, id: \.self) { i in
                         MetricChart(
                             title: "Freq \(i)",
                             icon: nil,
                             unit: "MHz",
-                            values: history.snapshots.map { s in
-                                s.perCoreFreqMHz.count > i ? s.perCoreFreqMHz[i] : 0
-                            },
+                            values: history.perCoreFreqColumns[i],
                             format: { String(format: "%.0f", $0) },
                             compact: true
                         )
@@ -183,8 +181,8 @@ struct DetailView: View {
                     icon: "arrow.triangle.2.circlepath",
                     unit: "",
                     values: history.snapshots.map { Double($0.swapBytes) },
-                    format: fmtBytesSmall,
-                    latestText: history.snapshots.last.map { fmtBytesSmall(Double($0.swapBytes)) }
+                    format: MetricFormat.bytesCompact,
+                    latestText: history.snapshots.last.map { MetricFormat.bytesCompact(Double($0.swapBytes)) }
                 )
 
                 MetricChart(
@@ -211,14 +209,14 @@ struct DetailView: View {
                 icon: "arrow.down",
                 unit: "",
                 values: history.snapshots.map(\.diskReadSpeed),
-                format: fmtSpeedShort
+                format: MetricFormat.speedCompact
             )
             MetricChart(
                 title: locale.localized("Disk Write"),
                 icon: "arrow.up",
                 unit: "",
                 values: history.snapshots.map(\.diskWriteSpeed),
-                format: fmtSpeedShort
+                format: MetricFormat.speedCompact
             )
         }
     }
@@ -231,20 +229,20 @@ struct DetailView: View {
                 icon: "arrow.down",
                 unit: "",
                 values: history.snapshots.map(\.downloadSpeed),
-                format: fmtSpeedShort
+                format: MetricFormat.speedCompact
             )
             MetricChart(
                 title: locale.localized("Network Up"),
                 icon: "arrow.up",
                 unit: "",
                 values: history.snapshots.map(\.uploadSpeed),
-                format: fmtSpeedShort
+                format: MetricFormat.speedCompact
             )
             MetricChart(
                 title: locale.localized("WiFi RSSI"),
                 icon: "wifi",
                 unit: "dBm",
-                values: history.snapshots.map { rssiNorm($0.wifiRSSI) },
+                values: history.snapshots.map { ColorScale.normalizedRSSI($0.wifiRSSI) },
                 maxY: 1.0,
                 format: { _ in "" },
                 latestText: history.snapshots.last.map { $0.wifiRSSI == 0 ? "\u{2014}" : "\($0.wifiRSSI)" },
@@ -287,29 +285,6 @@ struct DetailView: View {
     private func clampLevel(_ level: Int) -> Int {
         min(3, max(0, level))
     }
-
-    private func rssiNorm(_ rssi: Int) -> Double {
-        rssi == 0 ? 0 : Double(max(30, min(90, abs(rssi))) - 30) / 60.0
-    }
-
-    private func fmtBytesSmall(_ bytes: Double) -> String {
-        if bytes >= 1_000_000_000 {
-            return String(format: "%.1fG", bytes / 1_000_000_000)
-        } else {
-            return String(format: "%.0fM", bytes / 1_000_000)
-        }
-    }
-
-    private func fmtSpeedShort(_ bytesPerSec: Double) -> String {
-        guard bytesPerSec >= 0 else { return "0B" }
-        if bytesPerSec >= 1_000_000 {
-            return String(format: "%.1fM", bytesPerSec / 1_000_000)
-        } else if bytesPerSec >= 1_000 {
-            return String(format: "%.0fK", bytesPerSec / 1_000)
-        } else {
-            return String(format: "%.0fB", bytesPerSec)
-        }
-    }
 }
 
 // MARK: - Section Header
@@ -329,6 +304,37 @@ struct SectionHeader: View {
     }
 }
 
+// MARK: - Shared Chart Math
+
+/// Derived values for one chart series, computed once per body evaluation
+/// and shared by `PageHero` and `MetricChart` so the two cards cannot drift.
+struct ChartMetrics {
+    let values: [Double]
+    let effectiveMax: Double
+    let normPoints: [Double]
+    let avg: Double
+    let peak: Double
+
+    init(values: [Double], maxY: Double?) {
+        self.values = values
+        let peak = values.max() ?? 0
+        self.peak = peak
+        if let maxY {
+            effectiveMax = max(maxY, 0.001)
+        } else {
+            effectiveMax = max(peak * 1.08, 0.001)
+        }
+        let maxValue = effectiveMax
+        normPoints = values.map { min(1.0, max(0, $0 / maxValue)) }
+        avg = values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+    }
+
+    var latestColor: Color {
+        guard let last = values.last else { return .secondary }
+        return ColorScale.color(for: min(1.0, max(0, last / effectiveMax)))
+    }
+}
+
 // MARK: - Page Hero
 
 /// Large overview card for a page's primary metric: icon chip, big live
@@ -344,30 +350,8 @@ struct PageHero: View {
     var latestText: String? = nil
     var showStats: Bool = true
 
-    private var effectiveMax: Double {
-        if let maxY { return max(maxY, 0.001) }
-        let peak = values.max() ?? 0
-        return max(peak * 1.08, 0.001)
-    }
-
-    private var normPoints: [Double] {
-        values.map { min(1.0, max(0, $0 / effectiveMax)) }
-    }
-
-    private var latestColor: Color {
-        guard let last = values.last else { return .secondary }
-        return ColorScale.color(for: min(1.0, max(0, last / effectiveMax)))
-    }
-
-    private var avg: Double {
-        values.reduce(0, +) / Double(values.count)
-    }
-
-    private var peak: Double {
-        values.max() ?? 0
-    }
-
     var body: some View {
+        let m = ChartMetrics(values: values, maxY: maxY)
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
@@ -383,7 +367,7 @@ struct PageHero: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(latestText ?? (values.last.map(format) ?? "\u{2014}"))
                     .font(.system(size: 40, weight: .semibold, design: .rounded))
-                    .foregroundStyle(latestColor)
+                    .foregroundStyle(m.latestColor)
                     .monospacedDigit()
                     .lineLimit(1)
                 if !unit.isEmpty {
@@ -393,14 +377,14 @@ struct PageHero: View {
                 }
             }
 
-            if normPoints.count > 1 {
-                Sparkline(values: normPoints, color: latestColor, height: 84)
+            if m.normPoints.count > 1 {
+                Sparkline(values: m.normPoints, color: m.latestColor, height: 84)
             } else {
                 Color.clear.frame(height: 84)
             }
 
             if showStats && values.count > 1 {
-                stats
+                stats(m)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -411,10 +395,10 @@ struct PageHero: View {
         )
     }
 
-    private var stats: some View {
+    private func stats(_ m: ChartMetrics) -> some View {
         HStack(spacing: 0) {
-            Text("AVG \(format(avg))")
-            Text("  \u{00B7}  MAX \(format(peak))")
+            Text("AVG \(format(m.avg))")
+            Text("  \u{00B7}  MAX \(format(m.peak))")
         }
         .font(.caption.monospacedDigit())
         .foregroundStyle(.tertiary)
@@ -438,28 +422,14 @@ struct MetricChart: View {
     var showStats: Bool = true
     var compact: Bool = false
 
-    private var effectiveMax: Double {
-        if let maxY { return max(maxY, 0.001) }
-        let peak = values.max() ?? 0
-        return max(peak * 1.08, 0.001)
-    }
-
-    private var normPoints: [Double] {
-        values.map { min(1.0, max(0, $0 / effectiveMax)) }
-    }
-
-    private var latestColor: Color {
-        guard let last = values.last else { return .secondary }
-        return ColorScale.color(for: min(1.0, max(0, last / effectiveMax)))
-    }
-
     var body: some View {
+        let m = ChartMetrics(values: values, maxY: maxY)
         VStack(alignment: .leading, spacing: compact ? 6 : 10) {
-            header
-            if normPoints.count > 1 {
+            header(color: m.latestColor)
+            if m.normPoints.count > 1 {
                 Sparkline(
-                    values: normPoints,
-                    color: latestColor,
+                    values: m.normPoints,
+                    color: m.latestColor,
                     height: compact ? 48 : 84,
                     lineWidth: compact ? 1.5 : 2
                 )
@@ -467,7 +437,7 @@ struct MetricChart: View {
                 Color.clear.frame(height: compact ? 48 : 84)
             }
             if showStats && !compact && values.count > 1 {
-                stats
+                stats(m)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -478,7 +448,7 @@ struct MetricChart: View {
         )
     }
 
-    private var header: some View {
+    private func header(color: Color) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if let icon {
                 Image(systemName: icon)
@@ -493,7 +463,7 @@ struct MetricChart: View {
             if let latestText {
                 Text(latestText)
                     .font(compact ? .caption.monospaced().weight(.semibold) : .callout.monospaced().weight(.semibold))
-                    .foregroundStyle(latestColor)
+                    .foregroundStyle(color)
                     .lineLimit(1)
             } else if let last = values.last {
                 Text(format(last))
@@ -502,7 +472,7 @@ struct MetricChart: View {
                             ? .system(.subheadline, design: .rounded).weight(.semibold)
                             : .system(.title3, design: .rounded).weight(.semibold)
                     )
-                    .foregroundStyle(latestColor)
+                    .foregroundStyle(color)
                     .monospacedDigit()
                     .lineLimit(1)
             }
@@ -514,22 +484,14 @@ struct MetricChart: View {
         }
     }
 
-    private var stats: some View {
+    private func stats(_ m: ChartMetrics) -> some View {
         HStack(spacing: 0) {
-            Text("AVG \(format(avg))")
-            Text("  \u{00B7}  MAX \(format(peak))")
+            Text("AVG \(format(m.avg))")
+            Text("  \u{00B7}  MAX \(format(m.peak))")
         }
         .font(.caption2)
         .foregroundStyle(.tertiary)
         .monospacedDigit()
-    }
-
-    private var avg: Double {
-        values.reduce(0, +) / Double(values.count)
-    }
-
-    private var peak: Double {
-        values.max() ?? 0
     }
 }
 

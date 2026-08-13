@@ -91,12 +91,13 @@ struct SettingsView: View {
             Section {
                 LabeledContent(locale.localized("Font")) {
                     Picker("", selection: $settings.fontName) {
-                        ForEach(SettingsStore.availableFonts, id: \.name) { f in
+                        ForEach(settings.availableFonts, id: \.name) { f in
                             Text(f.label).tag(f.name)
                         }
                     }
                     .labelsHidden()
                     .frame(width: 200)
+                    .onAppear { settings.loadAvailableFontsIfNeeded() }
                 }
                 LabeledContent(locale.localized("Font Scale")) {
                     HStack(spacing: 8) {
@@ -131,10 +132,9 @@ struct SettingsView: View {
 
             Section {
                 Picker("", selection: $settings.statusBarMetric) {
-                    Text("CPU").tag("cpu")
-                    Text("GPU").tag("gpu")
-                    Text("PWR").tag("pwr")
-                    Text("MEM").tag("memory")
+                    ForEach(StatusBarMetric.allCases) { metric in
+                        Text(metric.label).tag(metric.rawValue)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -152,10 +152,9 @@ struct SettingsView: View {
             Section {
                 LabeledContent(locale.localized("Refresh")) {
                     Picker("", selection: $settings.refreshInterval) {
-                        Text("1s").tag(1)
-                        Text("2s").tag(2)
-                        Text("3s").tag(3)
-                        Text("5s").tag(5)
+                        ForEach(SettingsStore.refreshOptions, id: \.self) { seconds in
+                            Text("\(seconds)s").tag(seconds)
+                        }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()

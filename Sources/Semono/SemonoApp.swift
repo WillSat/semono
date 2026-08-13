@@ -26,6 +26,9 @@ struct SemonoApp: App {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
+        // `body` can be re-evaluated; registration just rewrites the same two
+        // closures, so the repeat is harmless. (An `if` guard would need
+        // SceneBuilder's buildOptional, which it does not provide.)
         let _ = WindowRouter.register(openWindow: openWindow)
 
         Window("Semono Monitor", id: "monitor") {

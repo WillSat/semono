@@ -34,14 +34,15 @@ final class MetricsCollector: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 let s = SettingsStore.shared
-                let sb = s.statusBarMetric
+                let sb = StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu
                 let flags = Sampler.Flags(
-                    collectGPU: s.showComputeColumn || sb == "gpu",
-                    collectCPU: s.showComputeColumn || sb == "cpu",
-                    collectMemory: s.showMemoryColumn || sb == "memory",
-                    collectPower: s.showComputeColumn || sb == "pwr",
+                    collectGPU: s.showComputeColumn || sb == .gpu,
+                    collectCPU: s.showComputeColumn || sb == .cpu,
+                    collectMemory: s.showMemoryColumn || sb == .memory,
+                    collectPower: s.showComputeColumn || sb == .pwr,
                     collectStorage: s.showStorageColumn,
-                    collectNetwork: s.showNetworkColumn
+                    collectNetwork: s.showNetworkColumn,
+                    collectThermal: s.showStorageColumn || MetricsHistory.shared.isRecording
                 )
                 let sample = await sampler.sampleOnce(flags: flags)
                 self.apply(sample)
@@ -87,7 +88,7 @@ final class MetricsCollector: ObservableObject {
         // History is only maintained while the monitor window is on screen;
         // otherwise each tick's snapshot allocation is pure overhead.
         if MetricsHistory.shared.isRecording {
-            MetricsHistory.shared.record(from: self)
+            MetricsHistory.shared.record(sample: s)
         }
     }
 }
@@ -105,9 +106,10 @@ struct Sampler: Sendable {
         var collectPower: Bool
         var collectStorage: Bool
         var collectNetwork: Bool
+        var collectThermal: Bool
     }
 
-    struct Sample: Sendable {
+    struct Sample: Sendable, Equatable {
         var gpuUsage: Double = 0
         var cpuUsage: Double = 0
         var perCoreCPU: [Double] = []
@@ -149,8 +151,13 @@ struct Sampler: Sendable {
     private var cachedConnType = ""
     private var cachedRSSI = 0
     private var cachedInterfaceName = "en0"
+    /// `cachedInterfaceName` as a C string so the per-interface name compare
+    /// in `readNetworkBytes` allocates nothing per interface.
+    private var cachedInterfaceNameC: [CChar] = Array("en0".utf8CString)
     private var swapCacheDate = Date.distantPast
     private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
+    private var warnedPressureSysctl = false
+    private static let logger = Logger(subsystem: "com.semono.app", category: "sampler")
 
     mutating func sampleOnce(flags: Flags) async -> Sample {
         var s = Sample()
@@ -193,13 +200,15 @@ struct Sampler: Sendable {
         if flags.collectMemory {
             s.memoryUsage = Self.readMemory()
             if now.timeIntervalSince(swapCacheDate) >= Self.swapCacheInterval {
-                cachedSwap = Self.readSwapAndPressure()
+                cachedSwap = readSwapAndPressure()
                 swapCacheDate = now
             }
             (s.memoryPressureLevel, s.swapBytes, s.swapRatio) = cachedSwap
         }
 
-        s.thermalState = Self.readThermalState()
+        if flags.collectThermal {
+            s.thermalState = Self.readThermalState()
+        }
 
         if flags.collectNetwork {
             (s.downloadSpeed, s.uploadSpeed) = readNetwork()
@@ -209,6 +218,7 @@ struct Sampler: Sendable {
             // until the 15 s cache expires.
             if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval || !hasPrevNet {
                 (cachedConnType, cachedRSSI, cachedInterfaceName) = Self.readConnectionInfo()
+                cachedInterfaceNameC = Array(cachedInterfaceName.utf8CString)
                 connCacheDate = now
             }
             s.networkType = cachedConnType
@@ -235,6 +245,12 @@ struct Sampler: Sendable {
         guard result == KERN_SUCCESS, cpuInfo != nil else { return (0, []) }
 
         let cpuCount = Int(numCPUs)
+        // The kernel promises cpuCount * kCPUStateMax entries; if a future
+        // build ever returns fewer, bail before indexing past the buffer.
+        guard Int(numCpuInfo) >= cpuCount * Int(Self.kCPUStateMax) else {
+            Self.releaseCpuInfo(cpuInfo, count: numCpuInfo)
+            return (0, [])
+        }
         var user: UInt32 = 0
         var system: UInt32 = 0
         var idle: UInt32 = 0
@@ -261,8 +277,7 @@ struct Sampler: Sendable {
             perCoreNowTotal.append(coreTotal)
         }
 
-        let size = vm_size_t(MemoryLayout<integer_t>.stride * Int(numCpuInfo))
-        vm_deallocate(mach_task_self_, vm_address_t(bitPattern: cpuInfo), size)
+        Self.releaseCpuInfo(cpuInfo, count: numCpuInfo)
 
         let used = UInt64(user) + UInt64(system) + UInt64(nice)
         let total = used + UInt64(idle)
@@ -327,24 +342,29 @@ struct Sampler: Sendable {
 
     // MARK: - Memory Pressure + Swap
 
-    private static func readSwapAndPressure() -> (pressure: Int, swapBytes: UInt64, swapRatio: Double) {
+    private mutating func readSwapAndPressure() -> (pressure: Int, swapBytes: UInt64, swapRatio: Double) {
         var level: Int32 = 0
         var size = MemoryLayout<Int32>.size
-        sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0)
+        if sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) != 0 {
+            if !warnedPressureSysctl {
+                warnedPressureSysctl = true
+                Self.logger.error("kern.memorystatus_vm_pressure_level read failed; pressure will read normal")
+            }
+        }
 
         var swapSize = 0
         sysctlbyname("vm.swapusage", nil, &swapSize, nil, 0)
-        guard swapSize > 0 else { return (normalizePressure(Int(level)), 0, 0) }
+        guard swapSize > 0 else { return (Self.normalizePressure(Int(level)), 0, 0) }
 
         var buf = [CChar](repeating: 0, count: swapSize)
         var outSize = swapSize
         guard sysctlbyname("vm.swapusage", &buf, &outSize, nil, 0) == 0, outSize > 0 else {
-            return (normalizePressure(Int(level)), 0, 0)
+            return (Self.normalizePressure(Int(level)), 0, 0)
         }
 
         let (totalBytes, usedBytes) = SwapParser.usage(from: buf, size: outSize)
         let ratio: Double = totalBytes > 0 ? min(1.0, Double(usedBytes) / Double(totalBytes)) : 0
-        return (normalizePressure(Int(level)), usedBytes, ratio)
+        return (Self.normalizePressure(Int(level)), usedBytes, ratio)
     }
 
     /// Maps a raw `kern.memorystatus_vm_pressure_level` sysctl value to the
@@ -404,6 +424,10 @@ struct Sampler: Sendable {
 
     private mutating func readDisk(_ bytes: (UInt64, UInt64)?) -> (Double, Double) {
         guard let (r, w) = bytes else {
+            // Sampling failed (helper down): drop the baseline so the next
+            // reading re-baselines instead of reporting a rate that includes
+            // the downtime.
+            hasPrevDisk = false
             return (0, 0)
         }
         let now = Date()
@@ -440,7 +464,11 @@ struct Sampler: Sendable {
     // MARK: - Network Bytes
 
     private mutating func readNetwork() -> (Double, Double) {
-        guard let (tx, rx) = Self.readNetworkBytes(interface: cachedInterfaceName) else {
+        guard let (tx, rx) = Self.readNetworkBytes(interfaceCString: cachedInterfaceNameC) else {
+            // Sampling failed: drop the baseline so the next reading
+            // re-baselines instead of reporting a rate that includes the
+            // downtime.
+            hasPrevNet = false
             return (0, 0)
         }
         let now = Date()
@@ -510,7 +538,11 @@ struct Sampler: Sendable {
     private static func readPhysicalMemory() -> UInt64 {
         var mem: UInt64 = 0
         var size = MemoryLayout<UInt64>.size
-        sysctlbyname("hw.memsize", &mem, &size, nil, 0)
+        if sysctlbyname("hw.memsize", &mem, &size, nil, 0) != 0 {
+            // Runs once (static `totalMemory`); a failure would otherwise
+            // silently pin the memory percentage at 0.
+            logger.error("hw.memsize read failed; memory percentage will read 0")
+        }
         return mem
     }
 
@@ -549,7 +581,7 @@ struct Sampler: Sendable {
 
     // MARK: - Shared helpers
 
-    private static func readNetworkBytes(interface: String) -> (tx: UInt64, rx: UInt64)? {
+    private static func readNetworkBytes(interfaceCString: [CChar]) -> (tx: UInt64, rx: UInt64)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(first) }
@@ -558,8 +590,12 @@ struct Sampler: Sendable {
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
             guard let ifa = ptr else { continue }
-            let name = String(cString: ifa.pointee.ifa_name)
-            guard name == interface else { continue }
+            // Compare names as C strings — no String allocation per interface.
+            let matches = interfaceCString.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return false }
+                return strcmp(ifa.pointee.ifa_name, base) == 0
+            }
+            guard matches else { continue }
             guard let sa = ifa.pointee.ifa_addr,
                   sa.pointee.sa_family == UInt8(AF_LINK) else { continue }
             let data = ifa.pointee.ifa_data.assumingMemoryBound(to: if_data.self).pointee
@@ -568,313 +604,16 @@ struct Sampler: Sendable {
         return nil
     }
 
+    private static func releaseCpuInfo(_ info: processor_info_array_t, count: mach_msg_type_number_t) {
+        let size = vm_size_t(MemoryLayout<integer_t>.stride * Int(count))
+        vm_deallocate(mach_task_self_, vm_address_t(bitPattern: info), size)
+    }
+
     private static let kCPUStateMax    = Int32(4)
     private static let kCPUStateUser   = Int32(0)
     private static let kCPUStateSystem = Int32(1)
     private static let kCPUStateIdle   = Int32(2)
     private static let kCPUStateNice   = Int32(3)
-}
-
-// MARK: - Resident stats helper
-
-/// Persistent client for the bundled `stats_helper` subprocess. A single
-/// resident process serves GPU / power / disk readings over a line protocol
-/// (request line in, response line out), replacing the previous per-tick
-/// process spawns.
-///
-/// Requests are serialized (the sampler awaits each one). A request that
-/// does not answer within the timeout terminates the helper; the next query
-/// respawns it, so a hung helper recovers by itself and no worker thread is
-/// ever blocked — responses arrive through the pipe's readability handler.
-///
-/// All state is guarded by `lock`. The readability handler is dispatched on
-/// its own queue and may interleave with request submission, so it captures
-/// the process it belongs to and only mutates state while that process is
-/// still the current one — a late EOF from a replaced helper cannot clobber
-/// a newer helper's pipes or steal its pending request.
-private final class StatsHelper: @unchecked Sendable {
-    static let shared = StatsHelper()
-
-    private let lock = NSLock()
-    private let queue = DispatchQueue(label: "com.semono.app.statshelper", qos: .utility)
-    private var process: Process?
-    private var writeHandle: FileHandle?
-    private var readHandle: FileHandle?
-    private var pending: CheckedContinuation<String, Never>?
-    private var pendingTimer: DispatchSourceTimer?
-    /// Identity of the in-flight request (CheckedContinuation is a struct, so
-    /// ownership cannot be compared by identity). Lets the cancellation
-    /// handler and the post-registration re-check tell "our" request apart
-    /// from one that was already claimed or replaced.
-    private var pendingToken: QueryToken?
-    private var buffer = Data()
-    private let logger = Logger(subsystem: "com.semono.app", category: "stats_helper")
-    private var warnedSpawn = false
-    private var warnedHang = false
-    /// When the helper died (crash, kill, EOF). A fresh death suppresses
-    /// respawns for a short backoff so a helper that dies on launch is not
-    /// respawned — and logged about — on every tick.
-    private var lastHelperDeath: Date?
-    private static let respawnBackoff: TimeInterval = 10
-
-    private init() {}
-
-    /// Sends one request line and returns the response line. Returns ""
-    /// when the helper cannot be launched, times out, dies, or the calling
-    /// task is cancelled.
-    func query(_ name: String, timeout: TimeInterval = 2.0) async -> String {
-        let token = QueryToken()
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { cont in
-                lock.lock()
-                if process == nil || !(process?.isRunning ?? false) {
-                    let inBackoff: Bool
-                    if let death = lastHelperDeath {
-                        inBackoff = Date().timeIntervalSince(death) < Self.respawnBackoff
-                    } else {
-                        inBackoff = false
-                    }
-                    if !inBackoff {
-                        spawnLocked()
-                    } else {
-                        // The helper just died; skip the spawn this tick.
-                        lock.unlock()
-                        cont.resume(returning: "")
-                        return
-                    }
-                }
-                guard let proc = process, proc.isRunning, pending == nil else {
-                    if process == nil {
-                        warnOnce(flag: &warnedSpawn,
-                                 message: "stats_helper could not be launched; GPU/power/disk will read 0")
-                    }
-                    lock.unlock()
-                    cont.resume(returning: "")
-                    return
-                }
-                pending = cont
-                pendingToken = token
-
-                let timer = DispatchSource.makeTimerSource(queue: queue)
-                timer.schedule(deadline: .now() + timeout)
-                timer.setEventHandler { [weak self] in
-                    self?.handleTimeout(timer: timer)
-                }
-                pendingTimer = timer
-                timer.resume()
-
-                // The cancellation handler may have run before the
-                // continuation was registered; re-check so a cancelled task
-                // never stays suspended until the timeout. If the handler
-                // already claimed the request (token gone), it also resumed
-                // the continuation — do not resume twice.
-                guard !Task.isCancelled else {
-                    if pendingToken === token {
-                        pending = nil
-                        pendingToken = nil
-                        pendingTimer = nil
-                        lock.unlock()
-                        timer.cancel()
-                        cont.resume(returning: "")
-                    } else {
-                        lock.unlock()
-                    }
-                    return
-                }
-
-                do {
-                    try writeHandle?.write(contentsOf: Data((name + "\n").utf8))
-                    lock.unlock()
-                } catch {
-                    // The helper died between the running check and the write.
-                    // Drop the request and the timer; kill the helper so the
-                    // EOF handler frees the pipe state, and the next query
-                    // respawns a fresh process.
-                    pendingTimer = nil
-                    pending = nil
-                    pendingToken = nil
-                    lock.unlock()
-                    timer.cancel()
-                    killHelper(proc)
-                    cont.resume(returning: "")
-                }
-            }
-        } onCancel: {
-            // Resumes an in-flight request promptly when the caller is
-            // cancelled instead of leaving the task suspended until the
-            // timeout. Only claims the request while it is still ours. The
-            // helper is left running: its late response is dropped (pending
-            // is nil), so the line protocol stays in sync.
-            lock.lock()
-            guard pendingToken === token else {
-                lock.unlock()
-                return
-            }
-            let cont = pending
-            pending = nil
-            pendingToken = nil
-            let timer = pendingTimer
-            pendingTimer = nil
-            lock.unlock()
-            timer?.cancel()
-            cont?.resume(returning: "")
-        }
-    }
-
-    /// Kills the helper so no orphan remains after the app quits. Resumes
-    /// any in-flight request with "".
-    func shutdown() {
-        lock.lock()
-        let proc = process
-        process = nil
-        if let h = readHandle { h.readabilityHandler = nil }
-        readHandle = nil
-        writeHandle = nil
-        buffer = Data()
-        let cont = pending
-        pending = nil
-        pendingToken = nil
-        let timer = pendingTimer
-        pendingTimer = nil
-        lock.unlock()
-        timer?.cancel()
-        killHelper(proc)
-        cont?.resume(returning: "")
-    }
-
-    /// Timeout path: abandon the request and kill the helper. The EOF
-    /// handler observes the termination and frees the pipe state. A stale
-    /// timer (a response arrived first, or a newer request owns the slot)
-    /// is ignored.
-    private func handleTimeout(timer: DispatchSourceTimer) {
-        lock.lock()
-        guard pendingTimer === timer else {
-            lock.unlock()
-            return
-        }
-        pendingTimer = nil
-        let proc = process
-        let cont = pending
-        let alive = (proc?.isRunning ?? false) && cont != nil
-        if alive {
-            pending = nil
-            pendingToken = nil
-        }
-        lock.unlock()
-        timer.cancel()
-        guard alive else { return }
-        warnOnce(flag: &warnedHang,
-                 message: "stats_helper did not answer in time; restarting it")
-        killHelper(proc)
-        cont?.resume(returning: "")
-    }
-
-    private func spawnLocked() {
-        if let h = readHandle { h.readabilityHandler = nil }
-        readHandle = nil
-        writeHandle = nil
-        buffer = Data()
-
-        let name = "stats_helper"
-        var url = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(name)")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            // Debug runs (`swift run`) place the helper next to the executable.
-            url = Bundle.main.bundleURL.appendingPathComponent(name)
-        }
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            process = nil
-            return
-        }
-
-        let task = Process()
-        task.executableURL = url
-        let out = Pipe()
-        let input = Pipe()
-        task.standardOutput = out
-        task.standardInput = input
-        do {
-            try task.run()
-        } catch {
-            process = nil
-            return
-        }
-
-        process = task
-        // Reaps the child on exit so a killed helper never lingers as a
-        // zombie (the pipe's EOF is delivered by the kernel regardless).
-        task.terminationHandler = { proc in
-            proc.waitUntilExit()
-        }
-        writeHandle = input.fileHandleForWriting
-        readHandle = out.fileHandleForReading
-        readHandle?.readabilityHandler = { [weak self] handle in
-            guard let self else { return }
-            let data = handle.availableData
-            self.lock.lock()
-            if data.isEmpty {
-                // EOF: the helper died (or was terminated). Only tear down
-                // if this handle still belongs to the current process; a
-                // stale EOF from a replaced helper must not disturb the
-                // newer one or its pending request.
-                guard let proc = self.process, proc === task else {
-                    self.lock.unlock()
-                    return
-                }
-                self.lastHelperDeath = Date()
-                handle.readabilityHandler = nil
-                self.process = nil
-                self.readHandle = nil
-                self.writeHandle = nil
-                self.buffer = Data()
-                let cont = self.pending
-                self.pending = nil
-                self.pendingToken = nil
-                let timer = self.pendingTimer
-                self.pendingTimer = nil
-                self.lock.unlock()
-                timer?.cancel()
-                cont?.resume(returning: "")
-                return
-            }
-            self.buffer.append(data)
-            if let nl = self.buffer.firstIndex(of: 0x0A) {
-                let line = String(data: Data(self.buffer[..<nl]), encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                self.buffer = Data(self.buffer[(nl + 1)...])
-                // A real response means the helper is healthy again; re-arm
-                // the once-only warnings for a future failure episode.
-                self.warnedSpawn = false
-                self.warnedHang = false
-                let cont = self.pending
-                self.pending = nil
-                self.pendingToken = nil
-                let timer = self.pendingTimer
-                self.pendingTimer = nil
-                self.lock.unlock()
-                timer?.cancel()
-                cont?.resume(returning: line)
-            } else {
-                self.lock.unlock()
-            }
-        }
-    }
-
-    /// Terminates the helper. The spawn-time `terminationHandler` reaps it.
-    private func killHelper(_ proc: Process?) {
-        guard let proc, proc.isRunning else { return }
-        proc.terminate()
-    }
-
-    /// Reference-type identity token for an in-flight request; see
-    /// `pendingToken`. Carries no data, so it is safe to send across
-    /// isolation domains.
-    private final class QueryToken: @unchecked Sendable {}
-
-    private func warnOnce(flag: inout Bool, message: String) {
-        guard !flag else { return }
-        flag = true
-        logger.error("\(message, privacy: .public)")
-    }
 }
 
 private typealias processor_info_array_t = UnsafeMutablePointer<integer_t>

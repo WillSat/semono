@@ -13,7 +13,7 @@ struct HUDView: View {
                             color: ColorScale.color(for: metrics.cpuUsage))
                     valCell(label: "GPU", usage: metrics.gpuUsage,
                             color: ColorScale.color(for: metrics.gpuUsage))
-                    MetricCell(label: "PWR", value: fmtPwr(metrics.powerUsage),
+                    MetricCell(label: "PWR", value: MetricFormat.power(metrics.powerUsage),
                                color: .white.opacity(0.85))
                 }
             }
@@ -28,7 +28,7 @@ struct HUDView: View {
                             color: ColorScale.color(for: metrics.memoryUsage))
                     BarCell(label: "PRS", ratio: levelRatio(metrics.memoryPressureLevel),
                             color: ColorScale.color(forLevel: metrics.memoryPressureLevel))
-                    MetricCell(label: "SWAP", value: fmtSwap(metrics.swapBytes),
+                    MetricCell(label: "SWAP", value: MetricFormat.swap(metrics.swapBytes),
                                color: ColorScale.color(for: metrics.swapRatio))
                 }
             }
@@ -39,9 +39,9 @@ struct HUDView: View {
 
             if settings.showStorageColumn {
                 VStack(spacing: 0) {
-                    MetricCell(label: "DR", value: fmtSpeed(metrics.diskReadSpeed),
+                    MetricCell(label: "DR", value: MetricFormat.speed(metrics.diskReadSpeed),
                                color: .white.opacity(0.85))
-                    MetricCell(label: "DW", value: fmtSpeed(metrics.diskWriteSpeed),
+                    MetricCell(label: "DW", value: MetricFormat.speed(metrics.diskWriteSpeed),
                                color: .white.opacity(0.85))
                     BarCell(label: "THM", ratio: levelRatio(metrics.thermalState),
                             color: ColorScale.color(forLevel: metrics.thermalState))
@@ -79,9 +79,15 @@ struct HUDView: View {
     private var scale: CGFloat { CGFloat(1.0 + settings.fontScale / 10.0) }
     private var labelFontSz: CGFloat { 8 * scale }
     private var valueFontSz: CGFloat { 11 * scale }
-    private var barW: CGFloat { valueFontSz * 3.0 }
-    private var barH: CGFloat { valueFontSz * 0.85 }
+    private var barW: CGFloat { valueFontSz * Self.barWidthFactor }
+    private var barH: CGFloat { valueFontSz * Self.barHeightFactor }
+    private var cellHeight: CGFloat { valueFontSz * Self.cellHeightFactor }
     private var minSpacer: CGFloat { 4 * scale }
+
+    // Geometry factors tuned against the pixel-art HUD layout.
+    private static let barWidthFactor: CGFloat = 3.0
+    private static let barHeightFactor: CGFloat = 0.85
+    private static let cellHeightFactor: CGFloat = 1.15
 
     // MARK: - Cells
 
@@ -106,7 +112,7 @@ struct HUDView: View {
                 .monospacedDigit()
                 .lineLimit(1)
         }
-        .frame(height: valueFontSz * 1.15)
+        .frame(height: cellHeight)
     }
 
     private func BarCell(label: String, ratio: Double, color: Color) -> some View {
@@ -124,7 +130,7 @@ struct HUDView: View {
             }
             .frame(width: barW, height: barH)
         }
-        .frame(height: valueFontSz * 1.15)
+        .frame(height: cellHeight)
     }
 
     @ViewBuilder
@@ -147,12 +153,12 @@ struct HUDView: View {
                         .monospacedDigit()
                 }
             }
-            .frame(height: valueFontSz * 1.15)
+            .frame(height: cellHeight)
         } else {
             Text(metrics.networkType)
                 .font(.custom(currentFont, size: valueFontSz))
                 .foregroundColor(.white.opacity(0.7))
-                .frame(height: valueFontSz * 1.15)
+                .frame(height: cellHeight)
         }
     }
 
@@ -162,13 +168,13 @@ struct HUDView: View {
                 .font(.custom(currentFont, size: valueFontSz))
                 .foregroundColor(Color(red: 0.70, green: 0.55, blue: 0.92))
             Spacer(minLength: minSpacer)
-            Text(fmtSpeed(speed))
+            Text(MetricFormat.speed(speed))
                 .font(.custom(currentFont, size: valueFontSz))
                 .foregroundColor(.white.opacity(0.85))
                 .monospacedDigit()
                 .lineLimit(1)
         }
-        .frame(height: valueFontSz * 1.15)
+        .frame(height: cellHeight)
     }
 
     // MARK: - Helpers
@@ -182,41 +188,6 @@ struct HUDView: View {
     }
 
     private func fmtPct(_ v: Double) -> String { String(format: "%3d%%", Int(v * 100)) }
-    private func fmtPwr(_ w: Double) -> String { String(format: "%4.1f", w) }
     /// 0..3 level to a 0..1 bar ratio; level 0 renders as an empty bar.
     private func levelRatio(_ level: Int) -> Double { Double(level) / 3.0 }
-
-    private func fmtSwap(_ bytes: UInt64) -> String {
-        let raw: String
-        if bytes >= 1_000_000_000 {
-            raw = String(format: "%.1fG", Double(bytes) / 1_000_000_000)
-        } else if bytes >= 1_000_000 {
-            raw = String(format: "%.0fM", Double(bytes) / 1_000_000)
-        } else if bytes >= 1_000 {
-            raw = String(format: "%.0fK", Double(bytes) / 1_000)
-        } else {
-            raw = "\(bytes)B"
-        }
-        return pad(raw, to: 4)
-    }
-
-    private func fmtSpeed(_ bytesPerSec: Double) -> String {
-        let raw: String
-        guard bytesPerSec >= 0 else { return pad("0B", to: 5) }
-        if bytesPerSec >= 1_000_000 {
-            raw = String(format: "%.1fM", bytesPerSec / 1_000_000)
-        } else if bytesPerSec >= 10_000 {
-            raw = String(format: "%dK", Int(bytesPerSec / 1_000))
-        } else if bytesPerSec >= 1_000 {
-            raw = String(format: "%.1fK", bytesPerSec / 1_000)
-        } else {
-            raw = String(format: "%dB", Int(bytesPerSec))
-        }
-        return pad(raw, to: 5)
-    }
-
-    private func pad(_ s: String, to width: Int) -> String {
-        if s.count >= width { return s }
-        return String(repeating: " ", count: width - s.count) + s
-    }
 }
