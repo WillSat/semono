@@ -27,12 +27,23 @@ final class MetricsCollector: ObservableObject {
     init() {}
 
     private var updateTask: Task<Void, Never>?
+    /// When true the sampling loop idles instead of reading metrics, so a
+    /// hidden HUD (e.g. while a full-screen app is active with the option off)
+    /// draws no CPU or power. The stats helper stays alive so a resume is
+    /// immediate and never pays a re-baseline or respawn cost.
+    private var paused = false
 
     func start() {
         updateTask = Task { [weak self] in
             var sampler = Sampler()
             while !Task.isCancelled {
                 guard let self else { return }
+                if self.paused {
+                    // Idle while the HUD is hidden; re-check soon so a resume
+                    // is picked up without waiting a full refresh interval.
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
                 let s = SettingsStore.shared
                 let sb = StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu
                 let flags = Sampler.Flags(
@@ -63,6 +74,12 @@ final class MetricsCollector: ObservableObject {
         updateTask?.cancel()
         updateTask = nil
         StatsHelper.shared.shutdown()
+    }
+
+    /// Pauses / resumes metric collection. While paused the sampling loop
+    /// idles so a fully hidden HUD consumes no CPU or power.
+    func setPaused(_ paused: Bool) {
+        self.paused = paused
     }
 
     /// Publishes a sample. @Published fires only on actual value changes so

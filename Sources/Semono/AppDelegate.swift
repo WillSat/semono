@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         syncLoginItemState()
         observeMetrics()
         observeSettings()
+        observeFullscreen()
 
         NotificationCenter.default.addObserver(
             self,
@@ -58,6 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ aNotification: Notification) {
         metrics.stop()
+        for observer in fullscreenObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        fullscreenObservers.removeAll()
     }
 
     @objc private func screenParamsChanged() {
@@ -101,33 +106,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .store(in: &cancellables)
     }
 
-    // MARK: - Fullscreen behavior sync
+    // MARK: - Full-screen participation
 
-    /// Reacts to settings changes after they are written. `objectWillChange`
-    /// fires *before* the write, so a sink reading the property there still
-    /// sees the old value; the post-write `didChangeNotification` (the same
-    /// mechanism LocaleManager relies on) avoids that off-by-one-event lag.
-    private var appliedFullscreenBehavior: Bool?
+    /// The HUD's Space membership is constant — it always joins every Space
+    /// and other apps' full-screen Spaces (canJoinAllApplications), so it can
+    /// appear over a full-screen app whenever the option is on. The option is
+    /// instead enforced purely through visibility: we order the HUD out while
+    /// a full-screen app is active when the option is off. That applies on the
+    /// spot, no relaunch, and does not depend on collection behaviour, whose
+    /// treatment of full-screen Spaces has proven unreliable across macOS
+    /// releases.
+    private var fullscreenWindowCount = 0
+    private var fullscreenObservers: [NSObjectProtocol] = []
+
+    private func observeFullscreen() {
+        let center = NotificationCenter.default
+        // The HUD window is borderless and never enters full screen itself, so
+        // every didEnter/didExitFullScreen notification refers to another
+        // app's window (Semono's own monitor/settings windows included).
+        fullscreenObservers = [
+            center.addObserver(
+                forName: NSWindow.didEnterFullScreenNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.fullscreenWindowCount += 1
+                    self.updateFullscreenState()
+                }
+            },
+            center.addObserver(
+                forName: NSWindow.didExitFullScreenNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.fullscreenWindowCount = max(0, self.fullscreenWindowCount - 1)
+                    self.updateFullscreenState()
+                }
+            },
+        ]
+    }
 
     private func observeSettings() {
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncFullscreenBehavior() }
+            .sink { [weak self] _ in self?.updateFullscreenState() }
             .store(in: &cancellables)
     }
 
-    private func syncFullscreenBehavior() {
-        let enabled = SettingsStore.shared.showInFullscreen
-        guard appliedFullscreenBehavior != enabled else { return }
-        applyFullscreenBehavior(enabled)
-    }
-
-    private func applyFullscreenBehavior(_ enabled: Bool) {
-        appliedFullscreenBehavior = enabled
+    /// Re-evaluates the HUD from the current setting and the live
+    /// full-screen-window count, ordering it in or out as appropriate and
+    /// sleeping / waking metric collection with it. Because the option only
+    /// affects visibility — not the window's Space membership — a toggle takes
+    /// effect immediately, with no relaunch.
+    private func updateFullscreenState() {
         guard let w = window else { return }
-        w.collectionBehavior.remove(.fullScreenAuxiliary)
-        w.collectionBehavior.remove(.fullScreenNone)
-        w.collectionBehavior.insert(enabled ? .fullScreenAuxiliary : .fullScreenNone)
+        let showInFullscreen = SettingsStore.shared.showInFullscreen
+        if showInFullscreen || fullscreenWindowCount == 0 {
+            if !w.isVisible { w.orderFrontRegardless() }
+        } else {
+            w.orderOut(nil)
+        }
+        // Power savings: nothing on screen, nothing to sample.
+        metrics.setPaused(!w.isVisible)
     }
 
     // MARK: - HUD Window
@@ -158,8 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.hasShadow = false
         w.animationBehavior = .none
         w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
-        w.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
-        applyFullscreenBehavior(SettingsStore.shared.showInFullscreen)
+        w.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .ignoresCycle]
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
@@ -178,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         w.makeKeyAndOrderFront(nil)
         window = w
+        updateFullscreenState()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.initialFrameSaveDelay) { [weak self, weak w] in
             self?.scheduleSaveFrame(w)

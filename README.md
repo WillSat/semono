@@ -27,7 +27,7 @@ Four configurable columns:
 - Transparent floating window, draggable anywhere (including tucking under
   the Dock), position remembered across restarts
 - Menu bar icon with live metric readout, Settings and Quit
-- Optional fullscreen overlay (restart to apply)
+- Optional overlay in full-screen apps (off = HUD hidden while an app is full-screen; sampling sleeps while the HUD is hidden)
 - Monitor window: double-click the HUD for per-metric time-series charts
   (per-core CPU, GPU, memory, storage, network, thermal) with pause-free
   live history
@@ -41,7 +41,7 @@ Four configurable columns:
 |---------|---------|---------|
 | Refresh interval | 1 / 2 / 3 / 5 s | 3 s |
 | Background opacity | 0 – 100 % | 60 % |
-| Show in fullscreen | on / off | on |
+| Show when app is fullscreen | on / off | on |
 | Block display | on / off | off |
 | Font | system monospaced fonts | Departure Mono |
 | Font scale | −5 … +10 | 0 |
