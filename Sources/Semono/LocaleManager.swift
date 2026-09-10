@@ -52,7 +52,7 @@ final class LocaleManager: ObservableObject {
         "Opacity": "不透明度",
         "Font": "字体",
         "Font Scale": "字体缩放",
-        "Show when App is Fullscreen": "在应用全屏时也显示",
+        "Show in Fullscreen": "在全屏状态下显示",
         "Block Display": "块状显示",
         "Columns": "面板列",
         "Compute (CPU/GPU/PWR)": "计算 (CPU/GPU/PWR)",

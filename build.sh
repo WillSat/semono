@@ -19,9 +19,18 @@ for dir in "/Applications/Xcode.app" "/Applications/Xcode-beta.app"; do
 done
 
 echo "==> Building ${APP_NAME} (${BUILD_CONFIG})..."
+# The build has to be requested explicitly: `--show-bin-path` only reports where
+# the products *would* go, so a script that just asks for the path and then
+# copies from it happily repackages whatever binary happens to be lying around
+# from an earlier build.
+swift build -c "$BUILD_CONFIG"
 BIN_DIR=$(swift build -c "$BUILD_CONFIG" --show-bin-path)
 BIN_PATH="${BIN_DIR}/${APP_NAME}"
 echo "==> Binary: ${BIN_PATH}"
+if [ ! -f "$BIN_PATH" ]; then
+    echo "==> error: the build produced no binary at ${BIN_PATH}" >&2
+    exit 1
+fi
 
 # Versioning: the release workflow tags before building, so the latest tag is
 # the version being shipped. CFBundleVersion follows the project convention

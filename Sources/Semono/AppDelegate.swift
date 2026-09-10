@@ -27,12 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pruneLegacyDefaults()
         registerFont()
         setupStatusBar()
+        // Registering the Space observers first means the HUD's own state is
+        // translated into a sampling scope from the moment the window exists.
+        startSpaceObservation()
         showHUD()
         metrics.start()
         syncLoginItemState()
         observeMetrics()
         observeSettings()
-        observeFullscreen()
 
         NotificationCenter.default.addObserver(
             self,
@@ -59,14 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ aNotification: Notification) {
         metrics.stop()
-        for observer in fullscreenObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        fullscreenObservers.removeAll()
+        stopSpaceObservation()
     }
 
     @objc private func screenParamsChanged() {
         reposition()
+        // Displays appearing or disappearing can move the HUD between Spaces.
+        refreshOverlay()
     }
 
     /// Removes preference keys left behind by features that no longer exist
@@ -106,72 +107,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .store(in: &cancellables)
     }
 
-    // MARK: - Full-screen participation
+    // MARK: - Full-screen Spaces
 
-    /// The HUD's Space membership is constant — it always joins every Space
-    /// and other apps' full-screen Spaces (canJoinAllApplications), so it can
-    /// appear over a full-screen app whenever the option is on. The option is
-    /// instead enforced purely through visibility: we order the HUD out while
-    /// a full-screen app is active when the option is off. That applies on the
-    /// spot, no relaunch, and does not depend on collection behaviour, whose
-    /// treatment of full-screen Spaces has proven unreliable across macOS
-    /// releases.
-    private var fullscreenWindowCount = 0
-    private var fullscreenObservers: [NSObjectProtocol] = []
+    /// The overlay's Space policy. macOS puts every full-screen app in a Space
+    /// of its own, and the "show in fullscreen" setting decides whether the HUD
+    /// is allowed there — see `OverlaySpacePolicy`, where the membership, and
+    /// with it the visibility on any given desktop, is left to the window
+    /// server. All this class does is install the membership and then observe
+    /// its consequence: whether the HUD is on the Space the user is looking at.
+    private var spaceObservers: [NSObjectProtocol] = []
+    /// The setting last installed on the window, so the many unrelated defaults
+    /// writes (the four the HUD saves on every drag, for one) can never re-order
+    /// a window the user is dragging.
+    private var appliedShowInFullscreen: Bool?
+    /// Re-reads the state once a membership swap has settled.
+    private var membershipSettle: Task<Void, Never>?
 
-    private func observeFullscreen() {
-        let center = NotificationCenter.default
-        // The HUD window is borderless and never enters full screen itself, so
-        // every didEnter/didExitFullScreen notification refers to another
-        // app's window (Semono's own monitor/settings windows included).
-        fullscreenObservers = [
-            center.addObserver(
-                forName: NSWindow.didEnterFullScreenNotification,
+    /// Watches the user moving between Spaces — that is what decides whether
+    /// the HUD is on screen, and with it whether sampling runs at all.
+    private func startSpaceObservation() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        spaceObservers = [
+            workspace.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                guard let self else { return }
-                Task { @MainActor in
-                    self.fullscreenWindowCount += 1
-                    self.updateFullscreenState()
-                }
+                Task { @MainActor in self?.refreshOverlay() }
             },
-            center.addObserver(
-                forName: NSWindow.didExitFullScreenNotification,
+            workspace.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                guard let self else { return }
-                Task { @MainActor in
-                    self.fullscreenWindowCount = max(0, self.fullscreenWindowCount - 1)
-                    self.updateFullscreenState()
-                }
+                Task { @MainActor in self?.refreshOverlay() }
             },
         ]
+        refreshOverlay()
+    }
+
+    /// Applies a pending setting change and re-reads the resulting state.
+    ///
+    /// Writes made by this process are announced (`UserDefaults` posts its
+    /// change notification), which is how the Settings toggle takes effect at
+    /// once. Writes made by *another* process — a `defaults write`, say, or a
+    /// preferences sync — are not announced to this one, so the Space
+    /// notifications re-read the setting as well; the membership is only
+    /// touched when the value actually differs, so this costs a comparison.
+    private func refreshOverlay() {
+        syncOverlayMembership()
+        updateOverlayState()
+    }
+
+    private func stopSpaceObservation() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for observer in spaceObservers { workspace.removeObserver(observer) }
+        spaceObservers.removeAll()
+        membershipSettle?.cancel()
+        membershipSettle = nil
     }
 
     private func observeSettings() {
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateFullscreenState() }
+            .sink { [weak self] _ in self?.syncOverlayMembership() }
             .store(in: &cancellables)
     }
 
-    /// Re-evaluates the HUD from the current setting and the live
-    /// full-screen-window count, ordering it in or out as appropriate and
-    /// sleeping / waking metric collection with it. Because the option only
-    /// affects visibility — not the window's Space membership — a toggle takes
-    /// effect immediately, with no relaunch.
-    private func updateFullscreenState() {
+    /// Installs the setting on the live window. A collection-behaviour change
+    /// only takes effect for the Space the user is on when the window is
+    /// re-ordered along with it, so the swap is: order out, change membership,
+    /// order back in where the window now belongs.
+    ///
+    /// Ordering it front *regardless* of where it belongs is what strands a
+    /// window outside every desktop Space, so the HUD is only brought back when
+    /// it belongs on the active Space — after a swap to "off" while the user is
+    /// inside a full-screen Space that means staying out, which is the intended
+    /// result anyway.
+    private func syncOverlayMembership() {
         guard let w = window else { return }
-        let showInFullscreen = SettingsStore.shared.showInFullscreen
-        if showInFullscreen || fullscreenWindowCount == 0 {
-            if !w.isVisible { w.orderFrontRegardless() }
-        } else {
-            w.orderOut(nil)
+        let show = SettingsStore.shared.showInFullscreen
+        guard show != appliedShowInFullscreen else { return }
+        appliedShowInFullscreen = show
+
+        w.orderOut(nil)
+        w.collectionBehavior = OverlaySpacePolicy.collectionBehavior(showInFullscreen: show)
+        if show || w.isOnActiveSpace {
+            w.orderFrontRegardless()
         }
-        // Power savings: nothing on screen, nothing to sample.
-        metrics.setPaused(!w.isVisible)
+
+        // `isOnActiveSpace` can still describe the previous membership for a
+        // moment, so the state is read once more after the swap settles.
+        membershipSettle?.cancel()
+        membershipSettle = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.updateOverlayState()
+        }
+        updateOverlayState()
+    }
+
+    /// Reads whether the HUD is on screen right now and puts sampling to sleep
+    /// with it. The window server owns the answer: the HUD is displayed exactly
+    /// while the Space the user is looking at contains it — with the overlay
+    /// switched off that is every desktop Space and no full-screen Space.
+    ///
+    /// Nothing is sampled while the HUD is hidden, since the columns and the
+    /// monitor window's chart history have no reader then; the menu bar readout
+    /// is the one exception, because it is on screen over every desktop whether
+    /// the HUD is or not.
+    private func updateOverlayState() {
+        guard let w = window else { return }
+        // A swap that leaves the HUD ordered out although it belongs on the
+        // active Space would keep it hidden until the next Space change; order
+        // it back in. (With the overlay off inside a full-screen Space the
+        // window does not belong there, so this stays quiet.)
+        if !w.isVisible, w.isOnActiveSpace {
+            w.orderFrontRegardless()
+        }
+        metrics.setScope(OverlaySpacePolicy.isDisplayed(w) ? .full : .statusBarOnly)
     }
 
     // MARK: - HUD Window
@@ -202,7 +256,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.hasShadow = false
         w.animationBehavior = .none
         w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
-        w.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .ignoresCycle]
+        // The membership is set at creation from the current setting, which is
+        // what makes a launch while the user sits in a full-screen Space
+        // correct from the first frame — with the overlay off the HUD never
+        // appears there at all, rather than appearing and being ordered away.
+        w.collectionBehavior = OverlaySpacePolicy.collectionBehavior(
+            showInFullscreen: SettingsStore.shared.showInFullscreen
+        )
+        appliedShowInFullscreen = SettingsStore.shared.showInFullscreen
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
@@ -219,9 +280,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hudWindowDelegate = delegate
         w.delegate = delegate
 
-        w.makeKeyAndOrderFront(nil)
+        // orderFrontRegardless rather than makeKeyAndOrderFront: a borderless
+        // window never becomes key, and showing the HUD over a full-screen app
+        // must not pull focus away from it.
+        w.orderFrontRegardless()
         window = w
-        updateFullscreenState()
+        updateOverlayState()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.initialFrameSaveDelay) { [weak self, weak w] in
             self?.scheduleSaveFrame(w)

@@ -27,7 +27,12 @@ Four configurable columns:
 - Transparent floating window, draggable anywhere (including tucking under
   the Dock), position remembered across restarts
 - Menu bar icon with live metric readout, Settings and Quit
-- Optional overlay in full-screen apps (off = HUD hidden while an app is full-screen; sampling sleeps while the HUD is hidden)
+- Optional overlay in full-screen apps: macOS gives every full-screen app a
+  Space of its own, and this setting decides whether the HUD joins them (on =
+  visible on every desktop, the full-screen ones included; off = ordinary
+  desktops only)
+- Sampling sleeps with the HUD: while the HUD is off screen only the menu bar
+  metric is still read, so a full-screen video costs almost nothing
 - Monitor window: double-click the HUD for per-metric time-series charts
   (per-core CPU, GPU, memory, storage, network, thermal) with pause-free
   live history
@@ -41,7 +46,7 @@ Four configurable columns:
 |---------|---------|---------|
 | Refresh interval | 1 / 2 / 3 / 5 s | 3 s |
 | Background opacity | 0 – 100 % | 60 % |
-| Show when app is fullscreen | on / off | on |
+| Show in fullscreen | on / off | on |
 | Block display | on / off | off |
 | Font | system monospaced fonts | Departure Mono |
 | Font scale | −5 … +10 | 0 |

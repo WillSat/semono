@@ -82,7 +82,7 @@ struct SettingsView: View {
                             .frame(width: 40, alignment: .trailing)
                     }
                 }
-                Toggle(locale.localized("Show when App is Fullscreen"), isOn: $settings.showInFullscreen)
+                Toggle(locale.localized("Show in Fullscreen"), isOn: $settings.showInFullscreen)
                 Toggle(locale.localized("Block Display"), isOn: $settings.useBlockDisplay)
             } header: {
                 SettingsSectionHeader(icon: "rectangle.inset.filled", title: locale.localized("Window"))

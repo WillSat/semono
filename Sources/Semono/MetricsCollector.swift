@@ -27,64 +27,82 @@ final class MetricsCollector: ObservableObject {
     init() {}
 
     private var updateTask: Task<Void, Never>?
-    /// When true the sampling loop idles instead of reading metrics, so a
-    /// hidden HUD (e.g. while a full-screen app is active with the option off)
-    /// draws no CPU or power. The stats helper stays alive so a resume is
-    /// immediate and never pays a re-baseline or respawn cost.
-    private var paused = false
+    /// Cancels the current wait between ticks so a scope change is picked up at
+    /// once instead of up to a refresh interval later.
+    private var tickSleep: Task<Void, Never>?
+    /// What the loop is allowed to read right now; see `SamplingScope`.
+    private var scope: SamplingScope = .full
 
+    /// Runs one sampling loop for the lifetime of the app. The scope is read
+    /// afresh every tick, so the loop is never torn down and rebuilt when the
+    /// HUD sleeps or wakes — a rebuild would reset the rate baselines and the
+    /// slow-moving sensor caches along with it.
     func start() {
         updateTask = Task { [weak self] in
             var sampler = Sampler()
+            var lastScope: SamplingScope?
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.paused {
-                    // Idle while the HUD is hidden; re-check soon so a resume
-                    // is picked up without waiting a full refresh interval.
-                    try? await Task.sleep(for: .seconds(1))
-                    continue
+                let scope = self.scope
+                // Rates are deltas between consecutive reads. Across a sleep
+                // they would span a different measurement window, so the first
+                // tick back re-baselines rather than averaging over the nap.
+                if let lastScope, lastScope != scope {
+                    sampler.resetRateBaselines()
                 }
-                let s = SettingsStore.shared
-                let sb = StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu
-                let flags = Sampler.Flags(
-                    collectGPU: s.showComputeColumn || sb == .gpu,
-                    collectCPU: s.showComputeColumn || sb == .cpu,
-                    collectMemory: s.showMemoryColumn || sb == .memory,
-                    collectPower: s.showComputeColumn || sb == .pwr,
-                    collectStorage: s.showStorageColumn,
-                    collectNetwork: s.showNetworkColumn,
-                    collectThermal: s.showStorageColumn || MetricsHistory.shared.isRecording
-                )
-                let sample = await sampler.sampleOnce(flags: flags)
-                self.apply(sample)
+                lastScope = scope
 
-                let interval = Double(SettingsStore.shared.refreshInterval)
-                // Tolerance lets the kernel coalesce this wakeup with other
-                // system timers instead of the process waking alone on every
-                // tick; the HUD needs no tick-level precision.
-                try? await Task.sleep(
-                    for: .seconds(interval),
-                    tolerance: .seconds(min(interval * 0.2, 1.0))
-                )
+                let demand = SamplingDemand.current()
+                let sample = await sampler.sampleOnce(flags: .forTick(scope: scope, demand: demand))
+                self.apply(sample, recordingHistory: scope == .full && demand.recordsHistory)
+
+                await self.waitForNextTick()
             }
         }
     }
 
     func stop() {
+        tickSleep?.cancel()
+        tickSleep = nil
         updateTask?.cancel()
         updateTask = nil
         StatsHelper.shared.shutdown()
     }
 
-    /// Pauses / resumes metric collection. While paused the sampling loop
-    /// idles so a fully hidden HUD consumes no CPU or power.
-    func setPaused(_ paused: Bool) {
-        self.paused = paused
+    /// Puts the loop to sleep or wakes it. Driven purely by whether the HUD is
+    /// on screen; a no-op while the scope is unchanged.
+    func setScope(_ scope: SamplingScope) {
+        guard scope != self.scope else { return }
+        self.scope = scope
+        tickSleep?.cancel()
+    }
+
+    /// Sleeps out one refresh interval, cut short when the scope changes so a
+    /// HUD coming back on screen is repainted immediately instead of showing
+    /// what it last saw until the next scheduled tick.
+    private func waitForNextTick() async {
+        let interval = Double(SettingsStore.shared.refreshInterval)
+        // Tolerance lets the kernel coalesce this wakeup with other system
+        // timers instead of the process waking alone on every tick; the HUD
+        // needs no tick-level precision.
+        let tick = Task {
+            do {
+                try await Task.sleep(
+                    for: .seconds(interval),
+                    tolerance: .seconds(min(interval * 0.2, 1.0))
+                )
+            } catch {
+                // Cancelled because the scope changed: sample again right away.
+            }
+        }
+        tickSleep = tick
+        await tick.value
+        tickSleep = nil
     }
 
     /// Publishes a sample. @Published fires only on actual value changes so
     /// the HUD does not re-render when the metrics are static.
-    private func apply(_ s: Sampler.Sample) {
+    private func apply(_ s: Sampler.Sample, recordingHistory: Bool) {
         if gpuUsage != s.gpuUsage { gpuUsage = s.gpuUsage }
         if cpuUsage != s.cpuUsage { cpuUsage = s.cpuUsage }
         if perCoreCPU != s.perCoreCPU { perCoreCPU = s.perCoreCPU }
@@ -102,11 +120,51 @@ final class MetricsCollector: ObservableObject {
         if diskWriteSpeed != s.diskWriteSpeed { diskWriteSpeed = s.diskWriteSpeed }
         if thermalState != s.thermalState { thermalState = s.thermalState }
 
-        // History is only maintained while the monitor window is on screen;
-        // otherwise each tick's snapshot allocation is pure overhead.
-        if MetricsHistory.shared.isRecording {
+        // History is only kept for an on-screen monitor window and an awake
+        // HUD; otherwise each tick's snapshot allocation is pure overhead.
+        if recordingHistory {
             MetricsHistory.shared.record(sample: s)
         }
+    }
+}
+
+// MARK: - Sampling scope
+
+/// What the sampling loop is allowed to read.
+///
+/// The menu bar readout is on screen in every Space — including the full-screen
+/// Spaces the overlay itself is excluded from — so its metric is sampled in
+/// both scopes. Everything else (HUD columns, chart history) is only worth
+/// reading while the HUD is on screen: with the HUD hidden there is nothing to
+/// draw, and sampling sleeps until it comes back.
+enum SamplingScope: Equatable {
+    /// HUD on screen: columns, chart history and the menu bar metric.
+    case full
+    /// HUD not on screen: the menu bar metric alone.
+    case statusBarOnly
+}
+
+/// What the UI currently asks to see, independent of whether the HUD is asleep.
+/// Read from the settings at the top of every tick, or built by hand in tests.
+struct SamplingDemand: Equatable {
+    var computeColumn = true
+    var memoryColumn = true
+    var storageColumn = true
+    var networkColumn = true
+    var statusBarMetric: StatusBarMetric = .cpu
+    var recordsHistory = false
+
+    @MainActor
+    static func current() -> SamplingDemand {
+        let s = SettingsStore.shared
+        return SamplingDemand(
+            computeColumn: s.showComputeColumn,
+            memoryColumn: s.showMemoryColumn,
+            storageColumn: s.showStorageColumn,
+            networkColumn: s.showNetworkColumn,
+            statusBarMetric: StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu,
+            recordsHistory: MetricsHistory.shared.isRecording
+        )
     }
 }
 
@@ -124,6 +182,23 @@ struct Sampler: Sendable {
         var collectStorage: Bool
         var collectNetwork: Bool
         var collectThermal: Bool
+
+        /// One tick's work. Sleeping (`statusBarOnly`) reads exactly the metric
+        /// the menu bar shows and nothing else, which drops the IOKit sweeps,
+        /// the CoreWLAN pass and the helper round-trips with it.
+        static func forTick(scope: SamplingScope, demand: SamplingDemand) -> Flags {
+            let columns = scope == .full
+            let bar = demand.statusBarMetric
+            return Flags(
+                collectGPU: (columns && demand.computeColumn) || bar == .gpu,
+                collectCPU: (columns && demand.computeColumn) || bar == .cpu,
+                collectMemory: (columns && demand.memoryColumn) || bar == .memory,
+                collectPower: (columns && demand.computeColumn) || bar == .pwr,
+                collectStorage: columns && demand.storageColumn,
+                collectNetwork: columns && demand.networkColumn,
+                collectThermal: columns && (demand.storageColumn || demand.recordsHistory)
+            )
+        }
     }
 
     struct Sample: Sendable, Equatable {
@@ -175,6 +250,18 @@ struct Sampler: Sendable {
     private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
     private var warnedPressureSysctl = false
     private static let logger = Logger(subsystem: "com.semono.app", category: "sampler")
+
+    /// Drops the counters that throughput and CPU percentages are measured
+    /// against, so the next sample re-baselines them instead of dividing a long
+    /// silence by one short interval.
+    mutating func resetRateBaselines() {
+        prevCpuUsed = 0
+        prevCpuTotal = 0
+        prevPerCoreUsed = []
+        prevPerCoreTotal = []
+        hasPrevNet = false
+        hasPrevDisk = false
+    }
 
     mutating func sampleOnce(flags: Flags) async -> Sample {
         var s = Sample()
