@@ -1,32 +1,8 @@
 import Foundation
 
-/// Shared metric formatting. The HUD pads to a fixed field width so its
-/// columns do not jitter, while the monitor window uses compact labels; both
-/// sets live here instead of being re-derived per view.
+/// Shared HUD formatting. Values are padded to a fixed field width so the
+/// columns do not jitter when a digit count changes.
 enum MetricFormat {
-    // MARK: Monitor window (compact)
-
-    /// 500M / 1.2G style, for absolute byte counts.
-    static func bytesCompact(_ bytes: Double) -> String {
-        if bytes >= 1_000_000_000 {
-            return String(format: "%.1fG", bytes / 1_000_000_000)
-        } else {
-            return String(format: "%.0fM", bytes / 1_000_000)
-        }
-    }
-
-    /// 999B / 1.2K / 34M style, for per-second rates.
-    static func speedCompact(_ bytesPerSec: Double) -> String {
-        guard bytesPerSec >= 0 else { return "0B" }
-        if bytesPerSec >= 1_000_000 {
-            return String(format: "%.1fM", bytesPerSec / 1_000_000)
-        } else if bytesPerSec >= 1_000 {
-            return String(format: "%.0fK", bytesPerSec / 1_000)
-        } else {
-            return String(format: "%.0fB", bytesPerSec)
-        }
-    }
-
     // MARK: HUD (fixed width)
 
     /// Swap usage, right-padded to a 4-character field.

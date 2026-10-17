@@ -3,7 +3,6 @@ import SwiftUI
 struct HUDView: View {
     @ObservedObject var metrics: MetricsCollector
     @ObservedObject var settings = SettingsStore.shared
-    let onDoubleClick: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -62,10 +61,6 @@ struct HUDView: View {
                 .fill(Color.black.opacity(settings.backgroundOpacity))
         )
         .fixedSize()
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            onDoubleClick?()
-        }
     }
 
     // MARK: - Dimensions
@@ -100,14 +95,31 @@ struct HUDView: View {
         }
     }
 
+    /// PRS is a three-state kernel signal, not a percentage. Show a
+    /// right-aligned `#N` / `#W` / `#C` tag, coloured by level, instead of a
+    /// block progress bar whose height implied a granularity macOS does not
+    /// provide.
     @ViewBuilder
     private var pressureCell: some View {
-        if let level = metrics.memoryPressureLevel {
-            BarCell(label: "PRS", ratio: levelRatio(level),
-                    color: ColorScale.color(forLevel: level))
-        } else {
-            MetricCell(label: "PRS", value: MetricFormat.dash(4), color: .white.opacity(0.4))
+        HStack(spacing: 0) {
+            Text("PRS")
+                .font(.custom(currentFont, size: labelFontSz))
+                .foregroundColor(.white.opacity(0.4))
+            Spacer(minLength: minSpacer)
+            if let level = metrics.memoryPressureLevel {
+                Text("#\(MemoryPressure.abbreviation(for: level))")
+                    .font(.custom(currentFont, size: valueFontSz))
+                    .foregroundColor(ColorScale.color(forPressureLevel: level))
+                    .monospacedDigit()
+                    .lineLimit(1)
+            } else {
+                Text(MetricFormat.dash(4))
+                    .font(.custom(currentFont, size: valueFontSz))
+                    .foregroundColor(.white.opacity(0.4))
+                    .lineLimit(1)
+            }
         }
+        .frame(height: cellHeight)
     }
 
     @ViewBuilder

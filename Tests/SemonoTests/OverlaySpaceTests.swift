@@ -23,22 +23,15 @@ struct OverlaySpacePolicyTests {
 }
 
 /// The sampling scope is what keeps a hidden HUD from costing anything: with
-/// the HUD off screen, only the menu bar metric is read — unless the monitor
-/// window is open, which is an independent reader and needs every metric it
-/// draws even when the HUD is excluded from the current Space.
+/// the HUD off screen, only the menu bar metric is read.
 struct SamplingScopeTests {
-    private func demand(
-        columns: Bool,
-        metric: StatusBarMetric,
-        monitor: Bool = false
-    ) -> SamplingDemand {
+    private func demand(columns: Bool, metric: StatusBarMetric) -> SamplingDemand {
         SamplingDemand(
             computeColumn: columns,
             memoryColumn: columns,
             storageColumn: columns,
             networkColumn: columns,
-            statusBarMetric: metric,
-            monitorVisible: monitor
+            statusBarMetric: metric
         )
     }
 
@@ -54,10 +47,6 @@ struct SamplingScopeTests {
         #expect(f.collectStorage)
         #expect(f.collectNetwork)
         #expect(f.collectThermal)
-        // The HUD only renders aggregate CPU; per-core and frequency are
-        // monitor-only work.
-        #expect(!f.collectPerCoreCPU)
-        #expect(!f.collectFrequency)
     }
 
     @Test func sleepingSamplesOnlyTheMenuBarMetric() {
@@ -76,12 +65,10 @@ struct SamplingScopeTests {
             #expect(f.collectCPU == expected.cpu)
             #expect(f.collectPower == expected.pwr)
             #expect(f.collectMemory == expected.mem)
-            // Nothing only the HUD columns or the monitor window read survives.
+            // Nothing only the HUD columns read survives.
             #expect(!f.collectStorage)
             #expect(!f.collectNetwork)
             #expect(!f.collectThermal)
-            #expect(!f.collectPerCoreCPU)
-            #expect(!f.collectFrequency)
         }
     }
 
@@ -97,37 +84,5 @@ struct SamplingScopeTests {
         #expect(!f.collectStorage)
         #expect(!f.collectNetwork)
         #expect(!f.collectThermal)
-    }
-
-    @Test func closedColumnsStillFeedTheMonitor() {
-        let f = Sampler.Flags.forTick(
-            scope: .full,
-            demand: demand(columns: false, metric: .cpu, monitor: true)
-        )
-        #expect(f.collectGPU)
-        #expect(f.collectCPU)
-        #expect(f.collectMemory)
-        #expect(f.collectPower)
-        #expect(f.collectStorage)
-        #expect(f.collectNetwork)
-        #expect(f.collectThermal)
-        #expect(f.collectPerCoreCPU)
-        #expect(f.collectFrequency)
-    }
-
-    @Test func monitorKeepsSamplingWhileTheHUDisOnAnotherSpace() {
-        let f = Sampler.Flags.forTick(
-            scope: .statusBarOnly,
-            demand: demand(columns: false, metric: .cpu, monitor: true)
-        )
-        #expect(f.collectGPU)
-        #expect(f.collectCPU)
-        #expect(f.collectMemory)
-        #expect(f.collectPower)
-        #expect(f.collectStorage)
-        #expect(f.collectNetwork)
-        #expect(f.collectThermal)
-        #expect(f.collectPerCoreCPU)
-        #expect(f.collectFrequency)
     }
 }

@@ -46,12 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         #if DEBUG
-        // Screenshot-automation hook: opens both windows, then quits. Debug
-        // builds only, so it can never leak into a shipped bundle.
+        // Screenshot-automation hook: opens settings, then quits. Debug builds
+        // only, so it can never leak into a shipped bundle.
         if CommandLine.arguments.contains("--open-windows") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 NSApp.activate()
-                WindowRouter.openMonitor?()
                 WindowRouter.openSettings?()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
@@ -238,10 +237,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// while the Space the user is looking at contains it — with the overlay
     /// switched off that is every desktop Space and no full-screen Space.
     ///
-    /// Nothing is sampled while the HUD is hidden, since the columns and the
-    /// monitor window's chart history have no reader then; the menu bar readout
-    /// is the one exception, because it is on screen over every desktop whether
-    /// the HUD is or not.
+    /// Nothing is sampled while the HUD is hidden, since the columns have no
+    /// reader then; the menu bar readout is the one exception, because it is on
+    /// screen over every desktop whether the HUD is or not.
     private func updateOverlayState() {
         guard let w = window else { return }
         // A swap that leaves the HUD ordered out although it belongs on the
@@ -293,9 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
-        let hosting = NSHostingView(rootView: HUDView(metrics: metrics) { [weak self] in
-            self?.openDetail()
-        })
+        let hosting = NSHostingView(rootView: HUDView(metrics: metrics))
         hosting.translatesAutoresizingMaskIntoConstraints = false
         w.contentView = hosting
 
@@ -369,14 +365,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = MenubarContentView()
 
         let menu = NSMenu()
-        let monitorItem = NSMenuItem(
-            title: LocaleManager.shared.localized("Open Monitor"),
-            action: #selector(openDetail),
-            keyEquivalent: "m"
-        )
-        monitorItem.target = self
-        menu.addItem(monitorItem)
-
         let settingsItem = NSMenuItem(
             title: LocaleManager.shared.localized("Settings..."),
             action: #selector(openSettings),
@@ -421,11 +409,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         syncLoginItemState()
         WindowRouter.openSettings?()
-    }
-
-    @objc private func openDetail() {
-        NSApp.activate()
-        WindowRouter.openMonitor?()
     }
 
     @objc private func quitApp() {

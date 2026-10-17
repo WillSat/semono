@@ -8,9 +8,9 @@ only real hardware and Spaces can exercise.
 
 | Machine | Why |
 |---|---|
-| Apple Silicon laptop (M-series) | Battery power telemetry, Wi-Fi RSSI, P/E cores, frequency chart |
+| Apple Silicon laptop (M-series) | Battery power telemetry, Wi-Fi RSSI |
 | Apple Silicon desktop (Mac mini / Studio) | No `AppleSmartBattery`: power must show `—`, not 0.0 W |
-| Intel Mac (if supported by the target macOS) | No `AppleARMCPU` frequency; GPU/telemetry paths differ |
+| Intel Mac (if supported by the target macOS) | GPU/telemetry paths differ |
 | Multi-GPU / eGPU machine | `IOAccelerator` order and `Device Utilization %` availability |
 
 ## Network
@@ -28,8 +28,6 @@ only real hardware and Spaces can exercise.
 
 - Multiple displays with different scale factors.
 - Full-screen app with “Show in fullscreen” on and off.
-- Monitor window open while the HUD is excluded from the active full-screen
-  Space; the charts must keep recording.
 - Stage Manager / Mission Control Space changes.
 
 ## Power / thermal / memory
@@ -38,13 +36,14 @@ only real hardware and Spaces can exercise.
 - Low Power Mode.
 - Thermal pressure: idle, sustained CPU load, and a full-screen video.
 - Memory pressure: normal, warning, and critical if it can be induced safely.
-  Normal must show N/empty, not M/33%.
+  The PRS tag must show #N, #W or #C with the matching colour; normal must
+  not show a warning level.
 
 ## Release
 
 - Clean worktree, tag `vX.Y.Z`, `./build.sh release`.
 - Developer ID signature, Hardened Runtime, notarization, stapling, `spctl`.
-- Fresh Mac install: Gatekeeper launch, login item, monitor, HUD, uninstall.
+- Fresh Mac install: Gatekeeper launch, login item, HUD, settings, uninstall.
 - Kill/restart `stats_helper` while the app runs; GPU/power/disk must become
   `—` and recover, with no spike.
 
@@ -52,5 +51,5 @@ only real hardware and Spaces can exercise.
 
 - 24 h and, ideally, 30 days of uptime with the HUD visible.
 - Simulated CPU counters near `UInt32.max` (covered by `CPUUsageTests`).
-- Repeated monitor open/close, Space switching, helper restarts, and display
+- Repeated settings open/close, Space switching, helper restarts, and display
   hot-plug; check `leaks`/Instruments for growth.

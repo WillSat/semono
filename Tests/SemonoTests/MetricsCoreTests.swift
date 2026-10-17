@@ -11,10 +11,19 @@ struct MemoryPressureTests {
         #expect(MemoryPressure.level(fromRaw: 1) == 0)
     }
 
-    @Test func warningUrgentCriticalMapToThreeLevels() {
+    @Test func warningAndCriticalMapToTheTwoRaisedLevels() {
+        // macOS exposes normal/warning/critical; 3 is the legacy urgent value
+        // that the dispatch layer folds into warning.
         #expect(MemoryPressure.level(fromRaw: 2) == 1)
-        #expect(MemoryPressure.level(fromRaw: 3) == 2)
-        #expect(MemoryPressure.level(fromRaw: 4) == 3)
+        #expect(MemoryPressure.level(fromRaw: 3) == 1)
+        #expect(MemoryPressure.level(fromRaw: 4) == 2)
+    }
+
+    @Test func abbreviations() {
+        #expect(MemoryPressure.abbreviation(for: 0) == "N")
+        #expect(MemoryPressure.abbreviation(for: 1) == "W")
+        #expect(MemoryPressure.abbreviation(for: 2) == "C")
+        #expect(MemoryPressure.abbreviation(for: 99) == "C")
     }
 
     @Test func unknownRawValueFallsBackToNormal() {

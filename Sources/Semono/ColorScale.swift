@@ -47,6 +47,16 @@ enum ColorScale {
         return color(for: t)
     }
 
+    /// Three-state memory pressure palette: green normal, orange warning,
+    /// red critical. Used by the PRS indicator dot and abbreviation.
+    static func color(forPressureLevel level: Int) -> Color {
+        switch level {
+        case 0: return color(for: 0.25)
+        case 1: return color(for: 0.66)
+        default: return color(for: 1.0)
+        }
+    }
+
     /// 0..1 strength for an RSSI value. RSSI is negative dBm where -30 is
     /// excellent and -90 is unusable; 0 means "unavailable" and maps to 0.
     static func normalizedRSSI(_ rssi: Int) -> Double {

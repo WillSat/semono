@@ -2,19 +2,6 @@ import Testing
 @testable import Semono
 
 struct MetricFormatTests {
-    @Test func bytesCompactGigabytes() {
-        #expect(MetricFormat.bytesCompact(1_000_000_000) == "1.0G")
-        #expect(MetricFormat.bytesCompact(999_999_999) == "1000M")
-    }
-
-    @Test func speedCompactBuckets() {
-        #expect(MetricFormat.speedCompact(-5) == "0B")
-        #expect(MetricFormat.speedCompact(0) == "0B")
-        #expect(MetricFormat.speedCompact(999) == "999B")
-        #expect(MetricFormat.speedCompact(1_000) == "1K")
-        #expect(MetricFormat.speedCompact(1_000_000) == "1.0M")
-    }
-
     @Test func hudSwapPadsToFour() {
         #expect(MetricFormat.swap(0) == "  0B")
         #expect(MetricFormat.swap(999) == "999B")

@@ -3,7 +3,6 @@ import Darwin
 import Dispatch
 import SystemConfiguration
 import CoreWLAN
-import IOKit
 import Network
 import os
 
@@ -13,8 +12,6 @@ final class MetricsCollector: ObservableObject {
     // as a dash; it is never coerced to a plausible-looking zero.
     @Published var gpuUsage: Double?
     @Published var cpuUsage: Double?
-    @Published var perCoreCPU: [Double] = []
-    @Published var perCoreFreqMHz: [Double] = []
     @Published var memoryUsage: Double?
     @Published var powerUsage: Double?
     @Published var downloadSpeed: Double?
@@ -86,7 +83,7 @@ final class MetricsCollector: ObservableObject {
                 lastDemand = demand
 
                 let sample = await sampler.sampleOnce(flags: .forTick(scope: scope, demand: demand))
-                self.apply(sample, recordingHistory: demand.monitorVisible)
+                self.apply(sample)
                 await self.waitForNextTick()
             }
         }
@@ -141,11 +138,9 @@ final class MetricsCollector: ObservableObject {
 
     /// Publishes a sample. @Published fires only on actual value changes so
     /// the HUD does not re-render when the metrics are static.
-    private func apply(_ s: Sampler.Sample, recordingHistory: Bool) {
+    private func apply(_ s: Sampler.Sample) {
         if gpuUsage != s.gpuUsage { gpuUsage = s.gpuUsage }
         if cpuUsage != s.cpuUsage { cpuUsage = s.cpuUsage }
-        if perCoreCPU != s.perCoreCPU { perCoreCPU = s.perCoreCPU }
-        if perCoreFreqMHz != s.perCoreFreqMHz { perCoreFreqMHz = s.perCoreFreqMHz }
         if memoryUsage != s.memoryUsage { memoryUsage = s.memoryUsage }
         if powerUsage != s.powerUsage { powerUsage = s.powerUsage }
         if downloadSpeed != s.downloadSpeed { downloadSpeed = s.downloadSpeed }
@@ -158,13 +153,6 @@ final class MetricsCollector: ObservableObject {
         if diskReadSpeed != s.diskReadSpeed { diskReadSpeed = s.diskReadSpeed }
         if diskWriteSpeed != s.diskWriteSpeed { diskWriteSpeed = s.diskWriteSpeed }
         if thermalState != s.thermalState { thermalState = s.thermalState }
-
-        // History is kept only while the monitor window is on screen. It must
-        // not be tied to the HUD's Space scope: a monitor window can be open
-        // on a full-screen Space the HUD itself is excluded from.
-        if recordingHistory {
-            MetricsHistory.shared.record(sample: s)
-        }
     }
 }
 
@@ -174,12 +162,11 @@ final class MetricsCollector: ObservableObject {
 ///
 /// The menu bar readout is on screen in every Space — including the full-screen
 /// Spaces the overlay itself is excluded from — so its metric is sampled in
-/// both scopes. Everything else (HUD columns, chart history) is only worth
-/// reading while the HUD or the monitor window is on screen.
+/// both scopes. HUD columns are only worth reading while the HUD is on screen.
 enum SamplingScope: Equatable {
-    /// HUD on screen: columns, chart history and the menu bar metric.
+    /// HUD on screen: columns and the menu bar metric.
     case full
-    /// HUD not on screen: the menu bar metric alone, unless the monitor is open.
+    /// HUD not on screen: the menu bar metric alone.
     case statusBarOnly
 }
 
@@ -191,10 +178,6 @@ struct SamplingDemand: Equatable {
     var storageColumn = true
     var networkColumn = true
     var statusBarMetric: StatusBarMetric = .cpu
-    /// The monitor window is visible. It needs every metric, regardless of
-    /// which HUD columns are enabled, and it keeps history recording even when
-    /// the HUD is excluded from the current Space.
-    var monitorVisible = false
 
     @MainActor
     static func current() -> SamplingDemand {
@@ -204,8 +187,7 @@ struct SamplingDemand: Equatable {
             memoryColumn: s.showMemoryColumn,
             storageColumn: s.showStorageColumn,
             networkColumn: s.showNetworkColumn,
-            statusBarMetric: StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu,
-            monitorVisible: MetricsHistory.shared.isRecording
+            statusBarMetric: StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu
         )
     }
 }
@@ -219,8 +201,6 @@ struct Sampler: Sendable {
     struct Flags: Sendable {
         var collectGPU: Bool
         var collectCPU: Bool
-        var collectPerCoreCPU: Bool
-        var collectFrequency: Bool
         var collectMemory: Bool
         var collectPower: Bool
         var collectStorage: Bool
@@ -228,23 +208,18 @@ struct Sampler: Sendable {
         var collectThermal: Bool
 
         /// One tick's work. Sleeping (`statusBarOnly`) reads exactly the metric
-        /// the menu bar shows and nothing else, unless the monitor window is
-        /// open. The monitor is an independent reader and needs every metric
-        /// it draws, even when the HUD's columns are disabled.
+        /// the menu bar shows and nothing else.
         static func forTick(scope: SamplingScope, demand: SamplingDemand) -> Flags {
             let columns = scope == .full
-            let monitor = demand.monitorVisible
             let bar = demand.statusBarMetric
             return Flags(
-                collectGPU: (columns && demand.computeColumn) || bar == .gpu || monitor,
-                collectCPU: (columns && demand.computeColumn) || bar == .cpu || monitor,
-                collectPerCoreCPU: monitor,
-                collectFrequency: monitor,
-                collectMemory: (columns && demand.memoryColumn) || bar == .memory || monitor,
-                collectPower: (columns && demand.computeColumn) || bar == .pwr || monitor,
-                collectStorage: (columns && demand.storageColumn) || monitor,
-                collectNetwork: (columns && demand.networkColumn) || monitor,
-                collectThermal: monitor || (columns && demand.storageColumn)
+                collectGPU: (columns && demand.computeColumn) || bar == .gpu,
+                collectCPU: (columns && demand.computeColumn) || bar == .cpu,
+                collectMemory: (columns && demand.memoryColumn) || bar == .memory,
+                collectPower: (columns && demand.computeColumn) || bar == .pwr,
+                collectStorage: columns && demand.storageColumn,
+                collectNetwork: columns && demand.networkColumn,
+                collectThermal: columns && demand.storageColumn
             )
         }
     }
@@ -252,8 +227,6 @@ struct Sampler: Sendable {
     struct Sample: Sendable, Equatable {
         var gpuUsage: Double?
         var cpuUsage: Double?
-        var perCoreCPU: [Double] = []
-        var perCoreFreqMHz: [Double] = []
         var memoryUsage: Double?
         var powerUsage: Double?
         var downloadSpeed: Double?
@@ -270,12 +243,10 @@ struct Sampler: Sendable {
 
     // Slow-moving readings are cached and refreshed on longer intervals. All
     // instants are monotonic nanoseconds, never wall-clock Date values.
-    private static let freqCacheInterval: UInt64 = 30_000_000_000
     private static let connCacheInterval: UInt64 = 15_000_000_000
     private static let swapCacheInterval: UInt64 = 10_000_000_000
 
     private var prevCPULoad: CPULoad?
-    private var prevPerCoreLoads: [CPULoad] = []
     private var prevNetRx: UInt64 = 0
     private var prevNetTx: UInt64 = 0
     private var prevNetTime: UInt64 = 0
@@ -285,8 +256,6 @@ struct Sampler: Sendable {
     private var prevDiskWriteBytes: UInt64 = 0
     private var prevDiskTime: UInt64 = 0
     private var hasPrevDisk: Bool = false
-    private var freqCacheTime: UInt64 = 0
-    private var cachedFreq: [Double] = []
     private var connCacheTime: UInt64 = 0
     private var cachedConnType: String?
     private var cachedRSSI: Int?
@@ -299,11 +268,10 @@ struct Sampler: Sendable {
     /// Drops the counters that throughput and CPU percentages are measured
     /// against, so the next sample re-baselines them instead of dividing a long
     /// silence by one short interval. Cache timestamps are cleared too: after a
-    /// wake, the connection/frequency/swap readings may have changed while the
-    /// process was suspended.
+    /// wake, the connection/swap readings may have changed while the process
+    /// was suspended.
     mutating func resetRateBaselines() {
         prevCPULoad = nil
-        prevPerCoreLoads = []
         hasPrevNet = false
         prevNetInterface = nil
         hasPrevDisk = false
@@ -311,8 +279,6 @@ struct Sampler: Sendable {
         cachedConnType = nil
         cachedRSSI = nil
         cachedInterfaceName = nil
-        freqCacheTime = 0
-        cachedFreq = []
         swapCacheTime = 0
         cachedSwap = (nil, nil, nil)
     }
@@ -359,14 +325,7 @@ struct Sampler: Sendable {
             }
         }
         if flags.collectCPU {
-            (s.cpuUsage, s.perCoreCPU) = readCPU(collectPerCore: flags.collectPerCoreCPU)
-            if flags.collectFrequency {
-                if Self.intervalElapsed(now: now, since: freqCacheTime, interval: Self.freqCacheInterval) {
-                    cachedFreq = Self.readPerCoreFrequencies()
-                    freqCacheTime = now
-                }
-                s.perCoreFreqMHz = cachedFreq
-            }
+            s.cpuUsage = readCPU()
         }
 
         if flags.collectMemory {
@@ -408,7 +367,7 @@ struct Sampler: Sendable {
 
     // MARK: - CPU
 
-    private mutating func readCPU(collectPerCore: Bool) -> (Double?, [Double]) {
+    private mutating func readCPU() -> Double? {
         var numCPUs: natural_t = 0
         var cpuInfo: processor_info_array_t!
         var numCpuInfo: mach_msg_type_number_t = 0
@@ -422,8 +381,7 @@ struct Sampler: Sendable {
         )
         guard result == KERN_SUCCESS, cpuInfo != nil else {
             prevCPULoad = nil
-            prevPerCoreLoads = []
-            return (nil, [])
+            return nil
         }
 
         let cpuCount = Int(numCPUs)
@@ -432,28 +390,19 @@ struct Sampler: Sendable {
         guard Int(numCpuInfo) >= cpuCount * Int(Self.kCPUStateMax) else {
             Self.releaseCpuInfo(cpuInfo, count: numCpuInfo)
             prevCPULoad = nil
-            prevPerCoreLoads = []
-            return (nil, [])
+            return nil
         }
         var user: UInt64 = 0
         var system: UInt64 = 0
         var idle: UInt64 = 0
         var nice: UInt64 = 0
-        var currentLoads: [CPULoad] = []
-        currentLoads.reserveCapacity(cpuCount)
 
         for i in 0..<cpuCount {
             let base = Int(Self.kCPUStateMax) * i
-            let u = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateUser))]))
-            let s = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateSystem))]))
-            let id = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateIdle))]))
-            let n = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateNice))]))
-
-            user += u
-            system += s
-            idle += id
-            nice += n
-            currentLoads.append(CPULoad(user: u, system: s, nice: n, idle: id))
+            user += UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateUser))]))
+            system += UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateSystem))]))
+            idle += UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateIdle))]))
+            nice += UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateNice))]))
         }
 
         Self.releaseCpuInfo(cpuInfo, count: numCpuInfo)
@@ -461,15 +410,7 @@ struct Sampler: Sendable {
         let current = CPULoad(user: user, system: system, nice: nice, idle: idle)
         let aggregate = CPUUsage.fraction(previous: prevCPULoad, current: current)
         prevCPULoad = current
-
-        var perCore: [Double] = []
-        if collectPerCore, prevPerCoreLoads.count == cpuCount {
-            perCore = (0..<cpuCount).map { index in
-                CPUUsage.fraction(previous: prevPerCoreLoads[index], current: currentLoads[index]) ?? 0
-            }
-        }
-        prevPerCoreLoads = collectPerCore ? currentLoads : []
-        return (aggregate, perCore)
+        return aggregate
     }
 
     // MARK: - Memory
@@ -708,39 +649,6 @@ struct Sampler: Sendable {
             logger.error("hw.memsize read failed; memory percentage will read unavailable")
         }
         return mem
-    }
-
-    // MARK: - Frequency
-
-    private static func readPerCoreFrequencies() -> [Double] {
-        var freqs: [Double] = []
-
-        var iterator: io_iterator_t = 0
-        let matching = IOServiceMatching("AppleARMCPU")
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
-            return []
-        }
-        defer { IOObjectRelease(iterator) }
-
-        var entry = IOIteratorNext(iterator)
-        while entry != 0 {
-            if let props = IORegistryEntryCreateCFProperty(entry, "cpu-frequency" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() {
-                var freq: UInt64 = 0
-                switch props {
-                case let number as CFNumber:
-                    CFNumberGetValue(number, .sInt64Type, &freq)
-                case let data as CFData where CFDataGetLength(data) >= 8:
-                    CFDataGetBytes(data, CFRange(location: 0, length: 8), &freq)
-                default:
-                    break
-                }
-                freqs.append(Double(freq) / 1_000_000.0)
-            }
-            IOObjectRelease(entry)
-            entry = IOIteratorNext(iterator)
-        }
-
-        return freqs
     }
 
     // MARK: - Shared helpers

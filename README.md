@@ -31,8 +31,9 @@ Four configurable columns:
   temperature sensor.
 - **Network** reads the primary service's interface from the kernel's interface
   MIB in 64 bits; the refresh is a rate over a monotonic clock.
-- **Memory pressure** maps the system's normal/warning/critical levels to the
-  HUD's N/M/H/C scale. Normal does not draw a warning bar.
+- **Memory pressure** is a three-state kernel signal shown as a right-aligned
+  `#N` (normal), `#W` (warning) or `#C` (critical) tag, coloured by level. It
+  is not a percentage and not derived from swap usage.
 
 ## Features
 
@@ -42,7 +43,7 @@ Four configurable columns:
   track the primary service's interface
 - Transparent floating window, draggable anywhere (including tucking under
   the Dock), position remembered across restarts
-- Menu bar icon with live metric readout, Open Monitor, Settings and Quit
+- Menu bar icon with live metric readout, Settings and Quit
 - Optional overlay in full-screen apps: macOS gives every full-screen app a
   Space of its own, and this setting decides whether the HUD joins them (on =
   visible on every desktop, the full-screen ones included; off = ordinary
@@ -50,11 +51,7 @@ Four configurable columns:
 - Sampling sleeps with the HUD: while the HUD is off screen only the menu bar
   metric is still read. With “Show in fullscreen” on (the default) the HUD is
   visible over full-screen apps too, so the sleep path mainly matters when the
-  HUD is excluded from a full-screen Space or the monitor is closed.
-- Monitor window: double-click the HUD (or use “Open Monitor” in the menu bar)
-  for per-metric time-series charts (per-core CPU, GPU, memory, storage,
-  network, thermal). History is a 30-point window: ~30 s at 1 s refresh, ~150 s
-  at 5 s. The monitor keeps sampling independently of the HUD's Space.
+  HUD is excluded from a full-screen Space.
 - Chinese / English UI language switch
 - Single resident stats helper process serves all GPU / power / disk reads —
   no per-tick subprocess spawning, so the HUD measures the system, not itself
