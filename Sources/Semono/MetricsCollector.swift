@@ -1,28 +1,32 @@
 import Foundation
 import Darwin
+import Dispatch
 import SystemConfiguration
 import CoreWLAN
 import IOKit
+import Network
 import os
 
 @MainActor
 final class MetricsCollector: ObservableObject {
-    @Published var gpuUsage: Double = 0
-    @Published var cpuUsage: Double = 0
+    // A nil value means "not available / not measured yet". The UI renders it
+    // as a dash; it is never coerced to a plausible-looking zero.
+    @Published var gpuUsage: Double?
+    @Published var cpuUsage: Double?
     @Published var perCoreCPU: [Double] = []
     @Published var perCoreFreqMHz: [Double] = []
-    @Published var memoryUsage: Double = 0
-    @Published var powerUsage: Double = 0
-    @Published var downloadSpeed: Double = 0
-    @Published var uploadSpeed: Double = 0
-    @Published var networkType: String = ""
-    @Published var wifiRSSI: Int = 0
-    @Published var memoryPressureLevel: Int = 0
-    @Published var swapBytes: UInt64 = 0
-    @Published var swapRatio: Double = 0
-    @Published var diskReadSpeed: Double = 0
-    @Published var diskWriteSpeed: Double = 0
-    @Published var thermalState: Int = 0
+    @Published var memoryUsage: Double?
+    @Published var powerUsage: Double?
+    @Published var downloadSpeed: Double?
+    @Published var uploadSpeed: Double?
+    @Published var networkType: String?
+    @Published var wifiRSSI: Int?
+    @Published var memoryPressureLevel: Int?
+    @Published var swapBytes: UInt64?
+    @Published var swapRatio: Double?
+    @Published var diskReadSpeed: Double?
+    @Published var diskWriteSpeed: Double?
+    @Published var thermalState: Int?
 
     init() {}
 
@@ -32,30 +36,57 @@ final class MetricsCollector: ObservableObject {
     private var tickSleep: Task<Void, Never>?
     /// What the loop is allowed to read right now; see `SamplingScope`.
     private var scope: SamplingScope = .full
+    /// Set by sleep/wake/manual reset; consumed by the sampling loop before the
+    /// next tick so a long suspension is not averaged into one throughput read.
+    private var resetBaselinesNextTick = false
+    /// Set by NWPathMonitor when the interface path changes; forces the next
+    /// tick to re-resolve the primary service before reading counters.
+    private var networkRefreshNextTick = false
+    private let pathMonitor = NWPathMonitor()
 
     /// Runs one sampling loop for the lifetime of the app. The scope is read
     /// afresh every tick, so the loop is never torn down and rebuilt when the
     /// HUD sleeps or wakes — a rebuild would reset the rate baselines and the
     /// slow-moving sensor caches along with it.
     func start() {
+        pathMonitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor in
+                self?.networkRefreshNextTick = true
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "com.semono.app.network-path", qos: .utility))
+
         updateTask = Task { [weak self] in
             var sampler = Sampler()
             var lastScope: SamplingScope?
+            var lastDemand: SamplingDemand?
             while !Task.isCancelled {
                 guard let self else { return }
                 let scope = self.scope
-                // Rates are deltas between consecutive reads. Across a sleep
-                // they would span a different measurement window, so the first
-                // tick back re-baselines rather than averaging over the nap.
+                let demand = SamplingDemand.current()
+                // Rates are deltas between consecutive reads. Across a sleep,
+                // a Space change, a settings change, or a HUD wake they would
+                // span a different measurement window, so the first tick
+                // back re-baselines rather than averaging over the gap.
                 if let lastScope, lastScope != scope {
                     sampler.resetRateBaselines()
                 }
+                if let lastDemand, lastDemand != demand {
+                    sampler.resetRateBaselines()
+                }
+                if self.resetBaselinesNextTick {
+                    sampler.resetRateBaselines()
+                    self.resetBaselinesNextTick = false
+                }
+                if self.networkRefreshNextTick {
+                    sampler.invalidateConnectionCache()
+                    self.networkRefreshNextTick = false
+                }
                 lastScope = scope
+                lastDemand = demand
 
-                let demand = SamplingDemand.current()
                 let sample = await sampler.sampleOnce(flags: .forTick(scope: scope, demand: demand))
-                self.apply(sample, recordingHistory: scope == .full && demand.recordsHistory)
-
+                self.apply(sample, recordingHistory: demand.monitorVisible)
                 await self.waitForNextTick()
             }
         }
@@ -66,6 +97,7 @@ final class MetricsCollector: ObservableObject {
         tickSleep = nil
         updateTask?.cancel()
         updateTask = nil
+        pathMonitor.cancel()
         StatsHelper.shared.shutdown()
     }
 
@@ -74,6 +106,13 @@ final class MetricsCollector: ObservableObject {
     func setScope(_ scope: SamplingScope) {
         guard scope != self.scope else { return }
         self.scope = scope
+        tickSleep?.cancel()
+    }
+
+    /// Drops the rate baselines before the next tick. Called by the AppDelegate
+    /// after system wake, and available for tests/future clock-change hooks.
+    func resetRateBaselinesSoon() {
+        resetBaselinesNextTick = true
         tickSleep?.cancel()
     }
 
@@ -120,8 +159,9 @@ final class MetricsCollector: ObservableObject {
         if diskWriteSpeed != s.diskWriteSpeed { diskWriteSpeed = s.diskWriteSpeed }
         if thermalState != s.thermalState { thermalState = s.thermalState }
 
-        // History is only kept for an on-screen monitor window and an awake
-        // HUD; otherwise each tick's snapshot allocation is pure overhead.
+        // History is kept only while the monitor window is on screen. It must
+        // not be tied to the HUD's Space scope: a monitor window can be open
+        // on a full-screen Space the HUD itself is excluded from.
         if recordingHistory {
             MetricsHistory.shared.record(sample: s)
         }
@@ -135,12 +175,11 @@ final class MetricsCollector: ObservableObject {
 /// The menu bar readout is on screen in every Space — including the full-screen
 /// Spaces the overlay itself is excluded from — so its metric is sampled in
 /// both scopes. Everything else (HUD columns, chart history) is only worth
-/// reading while the HUD is on screen: with the HUD hidden there is nothing to
-/// draw, and sampling sleeps until it comes back.
+/// reading while the HUD or the monitor window is on screen.
 enum SamplingScope: Equatable {
     /// HUD on screen: columns, chart history and the menu bar metric.
     case full
-    /// HUD not on screen: the menu bar metric alone.
+    /// HUD not on screen: the menu bar metric alone, unless the monitor is open.
     case statusBarOnly
 }
 
@@ -152,7 +191,10 @@ struct SamplingDemand: Equatable {
     var storageColumn = true
     var networkColumn = true
     var statusBarMetric: StatusBarMetric = .cpu
-    var recordsHistory = false
+    /// The monitor window is visible. It needs every metric, regardless of
+    /// which HUD columns are enabled, and it keeps history recording even when
+    /// the HUD is excluded from the current Space.
+    var monitorVisible = false
 
     @MainActor
     static func current() -> SamplingDemand {
@@ -163,7 +205,7 @@ struct SamplingDemand: Equatable {
             storageColumn: s.showStorageColumn,
             networkColumn: s.showNetworkColumn,
             statusBarMetric: StatusBarMetric(rawValue: s.statusBarMetric) ?? .cpu,
-            recordsHistory: MetricsHistory.shared.isRecording
+            monitorVisible: MetricsHistory.shared.isRecording
         )
     }
 }
@@ -177,6 +219,8 @@ struct Sampler: Sendable {
     struct Flags: Sendable {
         var collectGPU: Bool
         var collectCPU: Bool
+        var collectPerCoreCPU: Bool
+        var collectFrequency: Bool
         var collectMemory: Bool
         var collectPower: Bool
         var collectStorage: Bool
@@ -184,88 +228,110 @@ struct Sampler: Sendable {
         var collectThermal: Bool
 
         /// One tick's work. Sleeping (`statusBarOnly`) reads exactly the metric
-        /// the menu bar shows and nothing else, which drops the IOKit sweeps,
-        /// the CoreWLAN pass and the helper round-trips with it.
+        /// the menu bar shows and nothing else, unless the monitor window is
+        /// open. The monitor is an independent reader and needs every metric
+        /// it draws, even when the HUD's columns are disabled.
         static func forTick(scope: SamplingScope, demand: SamplingDemand) -> Flags {
             let columns = scope == .full
+            let monitor = demand.monitorVisible
             let bar = demand.statusBarMetric
             return Flags(
-                collectGPU: (columns && demand.computeColumn) || bar == .gpu,
-                collectCPU: (columns && demand.computeColumn) || bar == .cpu,
-                collectMemory: (columns && demand.memoryColumn) || bar == .memory,
-                collectPower: (columns && demand.computeColumn) || bar == .pwr,
-                collectStorage: columns && demand.storageColumn,
-                collectNetwork: columns && demand.networkColumn,
-                collectThermal: columns && (demand.storageColumn || demand.recordsHistory)
+                collectGPU: (columns && demand.computeColumn) || bar == .gpu || monitor,
+                collectCPU: (columns && demand.computeColumn) || bar == .cpu || monitor,
+                collectPerCoreCPU: monitor,
+                collectFrequency: monitor,
+                collectMemory: (columns && demand.memoryColumn) || bar == .memory || monitor,
+                collectPower: (columns && demand.computeColumn) || bar == .pwr || monitor,
+                collectStorage: (columns && demand.storageColumn) || monitor,
+                collectNetwork: (columns && demand.networkColumn) || monitor,
+                collectThermal: monitor || (columns && demand.storageColumn)
             )
         }
     }
 
     struct Sample: Sendable, Equatable {
-        var gpuUsage: Double = 0
-        var cpuUsage: Double = 0
+        var gpuUsage: Double?
+        var cpuUsage: Double?
         var perCoreCPU: [Double] = []
         var perCoreFreqMHz: [Double] = []
-        var memoryUsage: Double = 0
-        var powerUsage: Double = 0
-        var downloadSpeed: Double = 0
-        var uploadSpeed: Double = 0
-        var networkType: String = ""
-        var wifiRSSI: Int = 0
-        var memoryPressureLevel: Int = 0
-        var swapBytes: UInt64 = 0
-        var swapRatio: Double = 0
-        var diskReadSpeed: Double = 0
-        var diskWriteSpeed: Double = 0
-        var thermalState: Int = 0
+        var memoryUsage: Double?
+        var powerUsage: Double?
+        var downloadSpeed: Double?
+        var uploadSpeed: Double?
+        var networkType: String?
+        var wifiRSSI: Int?
+        var memoryPressureLevel: Int?
+        var swapBytes: UInt64?
+        var swapRatio: Double?
+        var diskReadSpeed: Double?
+        var diskWriteSpeed: Double?
+        var thermalState: Int?
     }
 
-    // Slow-moving readings are cached and refreshed on longer intervals.
-    private static let freqCacheInterval: TimeInterval = 30
-    private static let connCacheInterval: TimeInterval = 15
-    private static let swapCacheInterval: TimeInterval = 10
+    // Slow-moving readings are cached and refreshed on longer intervals. All
+    // instants are monotonic nanoseconds, never wall-clock Date values.
+    private static let freqCacheInterval: UInt64 = 30_000_000_000
+    private static let connCacheInterval: UInt64 = 15_000_000_000
+    private static let swapCacheInterval: UInt64 = 10_000_000_000
 
-    private var prevCpuUsed: UInt64 = 0
-    private var prevCpuTotal: UInt64 = 0
-    private var prevPerCoreUsed: [UInt64] = []
-    private var prevPerCoreTotal: [UInt64] = []
+    private var prevCPULoad: CPULoad?
+    private var prevPerCoreLoads: [CPULoad] = []
     private var prevNetRx: UInt64 = 0
     private var prevNetTx: UInt64 = 0
-    private var prevNetTime: Date = .now
+    private var prevNetTime: UInt64 = 0
+    private var prevNetInterface: String?
     private var hasPrevNet: Bool = false
     private var prevDiskReadBytes: UInt64 = 0
     private var prevDiskWriteBytes: UInt64 = 0
-    private var prevDiskTime: Date = .now
+    private var prevDiskTime: UInt64 = 0
     private var hasPrevDisk: Bool = false
-    private var freqCacheDate = Date.distantPast
+    private var freqCacheTime: UInt64 = 0
     private var cachedFreq: [Double] = []
-    private var connCacheDate = Date.distantPast
-    private var cachedConnType = ""
-    private var cachedRSSI = 0
-    private var cachedInterfaceName = "en0"
-    /// `cachedInterfaceName` as a C string so the per-interface name compare
-    /// in `readNetworkBytes` allocates nothing per interface.
-    private var cachedInterfaceNameC: [CChar] = Array("en0".utf8CString)
-    private var swapCacheDate = Date.distantPast
-    private var cachedSwap: (Int, UInt64, Double) = (0, 0, 0)
+    private var connCacheTime: UInt64 = 0
+    private var cachedConnType: String?
+    private var cachedRSSI: Int?
+    private var cachedInterfaceName: String?
+    private var swapCacheTime: UInt64 = 0
+    private var cachedSwap: (Int?, UInt64?, Double?) = (nil, nil, nil)
     private var warnedPressureSysctl = false
     private static let logger = Logger(subsystem: "com.semono.app", category: "sampler")
 
     /// Drops the counters that throughput and CPU percentages are measured
     /// against, so the next sample re-baselines them instead of dividing a long
-    /// silence by one short interval.
+    /// silence by one short interval. Cache timestamps are cleared too: after a
+    /// wake, the connection/frequency/swap readings may have changed while the
+    /// process was suspended.
     mutating func resetRateBaselines() {
-        prevCpuUsed = 0
-        prevCpuTotal = 0
-        prevPerCoreUsed = []
-        prevPerCoreTotal = []
+        prevCPULoad = nil
+        prevPerCoreLoads = []
         hasPrevNet = false
+        prevNetInterface = nil
         hasPrevDisk = false
+        connCacheTime = 0
+        cachedConnType = nil
+        cachedRSSI = nil
+        cachedInterfaceName = nil
+        freqCacheTime = 0
+        cachedFreq = []
+        swapCacheTime = 0
+        cachedSwap = (nil, nil, nil)
+    }
+
+    /// Forces the next network sample to re-resolve the primary interface
+    /// before reading counters. Called while the sampler is otherwise idle
+    /// between ticks; no need to reset CPU/disk baselines.
+    mutating func invalidateConnectionCache() {
+        connCacheTime = 0
+        cachedConnType = nil
+        cachedRSSI = nil
+        cachedInterfaceName = nil
+        hasPrevNet = false
+        prevNetInterface = nil
     }
 
     mutating func sampleOnce(flags: Flags) async -> Sample {
         var s = Sample()
-        let now = Date()
+        let now = Self.monotonicNow()
 
         let wantsGPU = flags.collectGPU
         let wantsPower = flags.collectPower
@@ -279,7 +345,7 @@ struct Sampler: Sendable {
             if wantsGPU { s.gpuUsage = gpu }
             if wantsPower { s.powerUsage = power }
             if wantsDisk {
-                (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(disk)
+                (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(disk, now: now)
             }
         } else {
             if wantsGPU {
@@ -289,23 +355,25 @@ struct Sampler: Sendable {
                 s.powerUsage = await Self.readPower()
             }
             if wantsDisk {
-                (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(await Self.readDiskBytes())
+                (s.diskReadSpeed, s.diskWriteSpeed) = readDisk(await Self.readDiskBytes(), now: now)
             }
         }
         if flags.collectCPU {
-            (s.cpuUsage, s.perCoreCPU) = readCPU()
-            if now.timeIntervalSince(freqCacheDate) >= Self.freqCacheInterval {
-                cachedFreq = Self.readPerCoreFrequencies()
-                freqCacheDate = now
+            (s.cpuUsage, s.perCoreCPU) = readCPU(collectPerCore: flags.collectPerCoreCPU)
+            if flags.collectFrequency {
+                if Self.intervalElapsed(now: now, since: freqCacheTime, interval: Self.freqCacheInterval) {
+                    cachedFreq = Self.readPerCoreFrequencies()
+                    freqCacheTime = now
+                }
+                s.perCoreFreqMHz = cachedFreq
             }
-            s.perCoreFreqMHz = cachedFreq
         }
 
         if flags.collectMemory {
             s.memoryUsage = Self.readMemory()
-            if now.timeIntervalSince(swapCacheDate) >= Self.swapCacheInterval {
+            if Self.intervalElapsed(now: now, since: swapCacheTime, interval: Self.swapCacheInterval) {
                 cachedSwap = readSwapAndPressure()
-                swapCacheDate = now
+                swapCacheTime = now
             }
             (s.memoryPressureLevel, s.swapBytes, s.swapRatio) = cachedSwap
         }
@@ -315,16 +383,22 @@ struct Sampler: Sendable {
         }
 
         if flags.collectNetwork {
-            (s.downloadSpeed, s.uploadSpeed) = readNetwork()
-            // The first network sample resolves the real primary interface
-            // right away instead of trusting the "en0" default (which is
-            // wrong on machines whose primary interface is another name)
-            // until the 15 s cache expires.
-            if now.timeIntervalSince(connCacheDate) >= Self.connCacheInterval || !hasPrevNet {
-                (cachedConnType, cachedRSSI, cachedInterfaceName) = Self.readConnectionInfo()
-                cachedInterfaceNameC = Array(cachedInterfaceName.utf8CString)
-                connCacheDate = now
+            // Resolve the interface before reading counters. The old order
+            // read the default "en0" baseline first and only then discovered
+            // the real primary interface, so the second tick diffed counters
+            // across two different interfaces.
+            if connCacheTime == 0
+                || !hasPrevNet
+                || cachedInterfaceName == nil
+                || Self.intervalElapsed(now: now, since: connCacheTime, interval: Self.connCacheInterval)
+            {
+                let info = Self.readConnectionInfo()
+                cachedConnType = info.type
+                cachedRSSI = info.rssi
+                cachedInterfaceName = info.interface
+                connCacheTime = now
             }
+            (s.downloadSpeed, s.uploadSpeed) = readNetwork(now: now)
             s.networkType = cachedConnType
             s.wifiRSSI = cachedRSSI
         }
@@ -334,7 +408,7 @@ struct Sampler: Sendable {
 
     // MARK: - CPU
 
-    private mutating func readCPU() -> (Double, [Double]) {
+    private mutating func readCPU(collectPerCore: Bool) -> (Double?, [Double]) {
         var numCPUs: natural_t = 0
         var cpuInfo: processor_info_array_t!
         var numCpuInfo: mach_msg_type_number_t = 0
@@ -346,71 +420,55 @@ struct Sampler: Sendable {
             &cpuInfo,
             &numCpuInfo
         )
-        guard result == KERN_SUCCESS, cpuInfo != nil else { return (0, []) }
+        guard result == KERN_SUCCESS, cpuInfo != nil else {
+            prevCPULoad = nil
+            prevPerCoreLoads = []
+            return (nil, [])
+        }
 
         let cpuCount = Int(numCPUs)
         // The kernel promises cpuCount * kCPUStateMax entries; if a future
         // build ever returns fewer, bail before indexing past the buffer.
         guard Int(numCpuInfo) >= cpuCount * Int(Self.kCPUStateMax) else {
             Self.releaseCpuInfo(cpuInfo, count: numCpuInfo)
-            return (0, [])
+            prevCPULoad = nil
+            prevPerCoreLoads = []
+            return (nil, [])
         }
-        var user: UInt32 = 0
-        var system: UInt32 = 0
-        var idle: UInt32 = 0
-        var nice: UInt32 = 0
-
-        var perCoreNowUsed: [UInt64] = []
-        var perCoreNowTotal: [UInt64] = []
+        var user: UInt64 = 0
+        var system: UInt64 = 0
+        var idle: UInt64 = 0
+        var nice: UInt64 = 0
+        var currentLoads: [CPULoad] = []
+        currentLoads.reserveCapacity(cpuCount)
 
         for i in 0..<cpuCount {
             let base = Int(Self.kCPUStateMax) * i
-            let u = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateUser))])
-            let s = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateSystem))])
-            let id = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateIdle))])
-            let n = UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateNice))])
+            let u = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateUser))]))
+            let s = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateSystem))]))
+            let id = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateIdle))]))
+            let n = UInt64(UInt32(bitPattern: cpuInfo[Int(base + Int(Self.kCPUStateNice))]))
 
-            user   += u
+            user += u
             system += s
-            idle   += id
-            nice   += n
-
-            let coreUsed = UInt64(u) + UInt64(s) + UInt64(n)
-            let coreTotal = coreUsed + UInt64(id)
-            perCoreNowUsed.append(coreUsed)
-            perCoreNowTotal.append(coreTotal)
+            idle += id
+            nice += n
+            currentLoads.append(CPULoad(user: u, system: s, nice: n, idle: id))
         }
 
         Self.releaseCpuInfo(cpuInfo, count: numCpuInfo)
 
-        let used = UInt64(user) + UInt64(system) + UInt64(nice)
-        let total = used + UInt64(idle)
+        let current = CPULoad(user: user, system: system, nice: nice, idle: idle)
+        let aggregate = CPUUsage.fraction(previous: prevCPULoad, current: current)
+        prevCPULoad = current
 
-        var aggregate: Double = 0
-        if prevCpuTotal > 0, total > prevCpuTotal {
-            let usedDelta = used >= prevCpuUsed ? used - prevCpuUsed : 0
-            let totalDelta = total - prevCpuTotal
-            aggregate = min(1.0, Double(usedDelta) / Double(totalDelta))
-        }
-        prevCpuUsed = used
-        prevCpuTotal = total
-
-        var perCore: [Double] = Array(repeating: 0, count: cpuCount)
-        if prevPerCoreUsed.count == cpuCount {
-            for i in 0..<cpuCount {
-                guard perCoreNowTotal[i] > prevPerCoreTotal[i] else { continue }
-                let uDelta = perCoreNowUsed[i] >= prevPerCoreUsed[i]
-                    ? perCoreNowUsed[i] - prevPerCoreUsed[i]
-                    : 0
-                let tDelta = perCoreNowTotal[i] - prevPerCoreTotal[i]
-                if tDelta > 0 {
-                    perCore[i] = min(1.0, Double(uDelta) / Double(tDelta))
-                }
+        var perCore: [Double] = []
+        if collectPerCore, prevPerCoreLoads.count == cpuCount {
+            perCore = (0..<cpuCount).map { index in
+                CPUUsage.fraction(previous: prevPerCoreLoads[index], current: currentLoads[index]) ?? 0
             }
         }
-        prevPerCoreUsed = perCoreNowUsed
-        prevPerCoreTotal = perCoreNowTotal
-
+        prevPerCoreLoads = collectPerCore ? currentLoads : []
         return (aggregate, perCore)
     }
 
@@ -419,7 +477,7 @@ struct Sampler: Sendable {
     private static let pageSize = Double(sysconf(Int32(_SC_PAGESIZE)))
     private static let totalMemory: Double = Double(readPhysicalMemory())
 
-    private static func readMemory() -> Double {
+    private static func readMemory() -> Double? {
         var info = vm_statistics64()
         var count = mach_msg_type_number_t(
             MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
@@ -429,7 +487,7 @@ struct Sampler: Sendable {
                 host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
             }
         }
-        guard result == KERN_SUCCESS else { return 0 }
+        guard result == KERN_SUCCESS else { return nil }
 
         // Approximates Activity Monitor's "App + Wired + Compressed": app
         // pages are the internal (non-file-backed) pages minus the purgeable
@@ -440,51 +498,39 @@ struct Sampler: Sendable {
         let compressed = Double(info.compressor_page_count) * Self.pageSize
         let used = max(0, app) + wired + compressed
 
-        guard Self.totalMemory > 0 else { return 0 }
+        guard Self.totalMemory > 0 else { return nil }
         return min(1.0, used / Self.totalMemory)
     }
 
     // MARK: - Memory Pressure + Swap
 
-    private mutating func readSwapAndPressure() -> (pressure: Int, swapBytes: UInt64, swapRatio: Double) {
+    private mutating func readSwapAndPressure() -> (pressure: Int?, swapBytes: UInt64?, swapRatio: Double?) {
         var level: Int32 = 0
         var size = MemoryLayout<Int32>.size
-        if sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) != 0 {
+        let pressure: Int?
+        if sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0 {
+            pressure = MemoryPressure.level(fromRaw: Int(level))
+        } else {
+            pressure = nil
             if !warnedPressureSysctl {
                 warnedPressureSysctl = true
-                Self.logger.error("kern.memorystatus_vm_pressure_level read failed; pressure will read normal")
+                Self.logger.error("kern.memorystatus_vm_pressure_level read failed; pressure will read unavailable")
             }
         }
 
         var swapSize = 0
         sysctlbyname("vm.swapusage", nil, &swapSize, nil, 0)
-        guard swapSize > 0 else { return (Self.normalizePressure(Int(level)), 0, 0) }
+        guard swapSize > 0 else { return (pressure, nil, nil) }
 
         var buf = [CChar](repeating: 0, count: swapSize)
         var outSize = swapSize
         guard sysctlbyname("vm.swapusage", &buf, &outSize, nil, 0) == 0, outSize > 0 else {
-            return (Self.normalizePressure(Int(level)), 0, 0)
+            return (pressure, nil, nil)
         }
 
         let (totalBytes, usedBytes) = SwapParser.usage(from: buf, size: outSize)
-        let ratio: Double = totalBytes > 0 ? min(1.0, Double(usedBytes) / Double(totalBytes)) : 0
-        return (Self.normalizePressure(Int(level)), usedBytes, ratio)
-    }
-
-    /// Maps a raw `kern.memorystatus_vm_pressure_level` sysctl value to the
-    /// canonical 0..3 range (normal/warning/urgent/critical). xnu documents
-    /// contiguous 0..3, but some macOS builds report 1 = normal and use 4 for
-    /// critical, so the mapping is explicit instead of assumed contiguous.
-    /// Downstream consumers (PRS bar, N/M/H/C labels) only ever see 0..3.
-    private static func normalizePressure(_ raw: Int) -> Int {
-        switch raw {
-        case 0: return 0
-        case 1: return 1
-        case 2: return 2
-        case 3: return 3
-        case 4: return 3 // alternate builds report 4 = critical
-        default: return min(3, max(0, raw))
-        }
+        let ratio: Double? = totalBytes > 0 ? min(1.0, Double(usedBytes) / Double(totalBytes)) : 0
+        return (pressure, usedBytes, ratio)
     }
 
     // MARK: - Thermal
@@ -495,105 +541,110 @@ struct Sampler: Sendable {
 
     // MARK: - GPU
 
-    private static func readGPU() async -> Double {
+    private static func readGPU() async -> Double? {
         let raw = await StatsHelper.shared.query("gpu")
-        return min(1.0, (Double(raw) ?? 0) / 100.0)
+        guard let percent = HelperProtocol.double(raw) else { return nil }
+        return min(1.0, max(0, percent / 100.0))
     }
 
     /// One "all" request to the resident helper returns GPU percent,
     /// milliwatts, and the read/write byte counters on a single line, so
     /// the pipe round-trip and IOKit pass happen once per tick instead of
-    /// one round-trip per metric.
-    private static func readAll() async -> (gpu: Double, power: Double, disk: (UInt64, UInt64)?) {
+    /// one round-trip per metric. Each field can independently be `na`.
+    private static func readAll() async -> (gpu: Double?, power: Double?, disk: (UInt64, UInt64)?) {
         let raw = await StatsHelper.shared.query("all")
-        let parts = raw.split(separator: " ")
-        guard parts.count >= 4,
-              let gpuPct = Double(parts[0]),
-              let mw = Double(parts[1]),
-              let read = UInt64(parts[2]),
-              let write = UInt64(parts[3])
-        else { return (0, 0, nil) }
-        return (min(1.0, gpuPct / 100.0), mw / 1000.0, (read, write))
+        guard let fields = HelperProtocol.fields(raw, count: 4) else {
+            return (nil, nil, nil)
+        }
+        let gpu = HelperProtocol.double(fields[0]).map { min(1.0, max(0, $0 / 100.0)) }
+        let power = HelperProtocol.double(fields[1]).map { max(0, $0 / 1000.0) }
+        let read = HelperProtocol.uint64(fields[2])
+        let write = HelperProtocol.uint64(fields[3])
+        let disk: (UInt64, UInt64)? = (read != nil && write != nil) ? (read!, write!) : nil
+        return (gpu, power, disk)
     }
 
     // MARK: - Power
 
-    private static func readPower() async -> Double {
-        // The helper reports milliwatts (AppleSmartBattery SystemLoad).
+    private static func readPower() async -> Double? {
+        // The helper reports milliwatts (AppleSmartBattery SystemLoad), or
+        // `na` on machines without a battery / telemetry key.
         let raw = await StatsHelper.shared.query("power")
-        return (Double(raw) ?? 0) / 1000.0
+        return HelperProtocol.double(raw).map { max(0, $0 / 1000.0) }
     }
 
     // MARK: - Disk
 
-    private mutating func readDisk(_ bytes: (UInt64, UInt64)?) -> (Double, Double) {
+    private mutating func readDisk(_ bytes: (UInt64, UInt64)?, now: UInt64) -> (Double?, Double?) {
         guard let (r, w) = bytes else {
             // Sampling failed (helper down): drop the baseline so the next
             // reading re-baselines instead of reporting a rate that includes
             // the downtime.
             hasPrevDisk = false
-            return (0, 0)
+            return (nil, nil)
         }
-        let now = Date()
 
         guard hasPrevDisk else {
             prevDiskReadBytes = r; prevDiskWriteBytes = w; prevDiskTime = now
             hasPrevDisk = true
-            return (0, 0)
+            return (nil, nil)
         }
 
-        let dt = now.timeIntervalSince(prevDiskTime)
-        guard dt > 0 else {
-            prevDiskReadBytes = r; prevDiskWriteBytes = w; prevDiskTime = now
-            return (0, 0)
+        guard let dt = RateMath.seconds(from: prevDiskTime, to: now),
+              let readSpeed = RateMath.bytesPerSecond(previous: prevDiskReadBytes, current: r, seconds: dt),
+              let writeSpeed = RateMath.bytesPerSecond(previous: prevDiskWriteBytes, current: w, seconds: dt)
+        else {
+            hasPrevDisk = false
+            return (nil, nil)
         }
 
-        let rDelta = r >= prevDiskReadBytes ? r - prevDiskReadBytes : 0
-        let wDelta = w >= prevDiskWriteBytes ? w - prevDiskWriteBytes : 0
-        let readSpeed  = Double(rDelta) / dt
-        let writeSpeed = Double(wDelta) / dt
         prevDiskReadBytes = r; prevDiskWriteBytes = w; prevDiskTime = now
         return (readSpeed, writeSpeed)
     }
 
     private static func readDiskBytes() async -> (UInt64, UInt64)? {
         let raw = await StatsHelper.shared.query("disk")
-        let parts = raw.split(separator: " ")
-        guard parts.count == 2,
-              let r = UInt64(parts[0]),
-              let w = UInt64(parts[1]) else { return nil }
+        guard let fields = HelperProtocol.fields(raw, count: 2),
+              let r = HelperProtocol.uint64(fields[0]),
+              let w = HelperProtocol.uint64(fields[1])
+        else { return nil }
         return (r, w)
     }
 
     // MARK: - Network Bytes
 
-    private mutating func readNetwork() -> (Double, Double) {
-        guard let (tx, rx) = Self.readNetworkBytes(interfaceCString: cachedInterfaceNameC) else {
-            // Sampling failed: drop the baseline so the next reading
-            // re-baselines instead of reporting a rate that includes the
-            // downtime.
+    private mutating func readNetwork(now: UInt64) -> (Double?, Double?) {
+        guard let interface = cachedInterfaceName,
+              let counters = NetworkCounters.read(interfaceName: interface)
+        else {
+            // Sampling failed or there is no primary service: drop the
+            // baseline so a later reading cannot span the outage.
             hasPrevNet = false
-            return (0, 0)
+            prevNetInterface = nil
+            return (nil, nil)
         }
-        let now = Date()
 
-        guard hasPrevNet else {
-            prevNetRx = rx; prevNetTx = tx; prevNetTime = now
+        guard hasPrevNet, prevNetInterface == interface else {
+            prevNetRx = counters.receivedBytes
+            prevNetTx = counters.sentBytes
+            prevNetTime = now
+            prevNetInterface = interface
             hasPrevNet = true
-            return (0, 0)
+            return (nil, nil)
         }
 
-        let dt = now.timeIntervalSince(prevNetTime)
-        guard dt > 0 else {
-            prevNetRx = rx; prevNetTx = tx; prevNetTime = now
-            return (0, 0)
+        guard let dt = RateMath.seconds(from: prevNetTime, to: now),
+              let down = RateMath.bytesPerSecond(previous: prevNetRx, current: counters.receivedBytes, seconds: dt),
+              let up = RateMath.bytesPerSecond(previous: prevNetTx, current: counters.sentBytes, seconds: dt)
+        else {
+            // A counter regression means the interface was reset or replaced;
+            // the next tick establishes a fresh baseline.
+            hasPrevNet = false
+            prevNetInterface = nil
+            return (nil, nil)
         }
 
-        let rxDelta = rx >= prevNetRx ? rx - prevNetRx : 0
-        let txDelta = tx >= prevNetTx ? tx - prevNetTx : 0
-        let down = Double(rxDelta) / dt
-        let up   = Double(txDelta) / dt
-        prevNetRx = rx; prevNetTx = tx; prevNetTime = now
+        prevNetRx = counters.receivedBytes; prevNetTx = counters.sentBytes; prevNetTime = now
         return (down, up)
     }
 
@@ -603,38 +654,47 @@ struct Sampler: Sendable {
     /// actually uses (PrimaryInterface), so byte counters and the label
     /// always refer to the same interface. VPN and tethering services carry
     /// no Hardware key, so they are classified by their Type / name.
-    private static func readConnectionInfo() -> (type: String, rssi: Int, interface: String) {
+    private static func readConnectionInfo() -> (type: String?, rssi: Int?, interface: String?) {
         guard let store = SCDynamicStoreCreate(nil, "Semono" as CFString, nil, nil) else {
-            return ("---", 0, "en0")
+            return (nil, nil, nil)
         }
-        guard let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
-              let primaryID = global["PrimaryService"] as? String
+        // Prefer IPv4, but an IPv6-only network still has a primary service
+        // and interface; falling straight through to "Offline" would hide a
+        // working network and its counters.
+        let ipv4 = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any]
+        let ipv6 = ipv4 == nil
+            ? SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv6" as CFString) as? [String: Any]
+            : nil
+        guard let global = ipv4 ?? ipv6,
+              let primaryID = global["PrimaryService"] as? String,
+              let primaryInterface = global["PrimaryInterface"] as? String,
+              !primaryInterface.isEmpty
         else {
-            return ("---", 0, "en0")
+            return ("Offline", nil, nil)
         }
-        let primaryInterface = global["PrimaryInterface"] as? String ?? "en0"
 
         let svc = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(primaryID)/Interface" as CFString) as? [String: Any]
         let hardware = svc?["Hardware"] as? String ?? ""
         let type = svc?["Type"] as? String ?? ""
         let userDefinedName = (svc?["UserDefinedName"] as? String) ?? ""
-        let device = svc?["DeviceName"] as? String ?? primaryInterface
+        let device = (svc?["DeviceName"] as? String) ?? primaryInterface
 
         if hardware == "AirPort" {
-            let rssi = CWWiFiClient.shared().interface()?.rssiValue() ?? 0
+            let rawRSSI = CWWiFiClient.shared().interface()?.rssiValue()
+            let rssi = (rawRSSI ?? 0) == 0 ? nil : rawRSSI
             return ("WiFi", rssi, device)
         }
         // iPhone tethering (USB / Bluetooth PAN) reports as an Ethernet-
         // style service; label it as its own kind instead of "Eth".
         if userDefinedName.range(of: "iPhone", options: .caseInsensitive) != nil {
-            return ("iPhone", 0, device)
+            return ("iPhone", nil, device)
         }
         // VPN services (TUN-mode proxies etc.) carry Type == "VPN" and no
         // Hardware key; previously they matched nothing and showed "---".
         if type == "VPN" {
-            return ("VPN", 0, device)
+            return ("VPN", nil, device)
         }
-        return ("Eth", 0, device)
+        return ("Eth", nil, device)
     }
 
     // MARK: - Hardware Info (collected once)
@@ -645,7 +705,7 @@ struct Sampler: Sendable {
         if sysctlbyname("hw.memsize", &mem, &size, nil, 0) != 0 {
             // Runs once (static `totalMemory`); a failure would otherwise
             // silently pin the memory percentage at 0.
-            logger.error("hw.memsize read failed; memory percentage will read 0")
+            logger.error("hw.memsize read failed; memory percentage will read unavailable")
         }
         return mem
     }
@@ -685,27 +745,13 @@ struct Sampler: Sendable {
 
     // MARK: - Shared helpers
 
-    private static func readNetworkBytes(interfaceCString: [CChar]) -> (tx: UInt64, rx: UInt64)? {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
-        defer { freeifaddrs(first) }
+    private static func monotonicNow() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
 
-        var ptr: UnsafeMutablePointer<ifaddrs>? = first
-        while ptr != nil {
-            defer { ptr = ptr?.pointee.ifa_next }
-            guard let ifa = ptr else { continue }
-            // Compare names as C strings — no String allocation per interface.
-            let matches = interfaceCString.withUnsafeBufferPointer { buf in
-                guard let base = buf.baseAddress else { return false }
-                return strcmp(ifa.pointee.ifa_name, base) == 0
-            }
-            guard matches else { continue }
-            guard let sa = ifa.pointee.ifa_addr,
-                  sa.pointee.sa_family == UInt8(AF_LINK) else { continue }
-            let data = ifa.pointee.ifa_data.assumingMemoryBound(to: if_data.self).pointee
-            return (tx: UInt64(data.ifi_obytes), rx: UInt64(data.ifi_ibytes))
-        }
-        return nil
+    private static func intervalElapsed(now: UInt64, since: UInt64, interval: UInt64) -> Bool {
+        guard since != 0, now >= since else { return since == 0 }
+        return now - since >= interval
     }
 
     private static func releaseCpuInfo(_ info: processor_info_array_t, count: mach_msg_type_number_t) {

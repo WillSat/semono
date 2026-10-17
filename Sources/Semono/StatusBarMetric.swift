@@ -24,10 +24,10 @@ enum StatusBarMetric: String, CaseIterable, Identifiable {
     @MainActor
     func text(from metrics: MetricsCollector) -> String {
         switch self {
-        case .cpu: "\(Int(metrics.cpuUsage * 100))%"
-        case .gpu: "\(Int(metrics.gpuUsage * 100))%"
-        case .pwr: MetricFormat.power(metrics.powerUsage)
-        case .memory: "\(Int(metrics.memoryUsage * 100))%"
+        case .cpu: metrics.cpuUsage.map { "\(Int($0 * 100))%" } ?? "—"
+        case .gpu: metrics.gpuUsage.map { "\(Int($0 * 100))%" } ?? "—"
+        case .pwr: metrics.powerUsage.map(MetricFormat.power) ?? "—"
+        case .memory: metrics.memoryUsage.map { "\(Int($0 * 100))%" } ?? "—"
         }
     }
 }

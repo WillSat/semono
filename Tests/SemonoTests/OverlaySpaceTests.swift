@@ -23,13 +23,14 @@ struct OverlaySpacePolicyTests {
 }
 
 /// The sampling scope is what keeps a hidden HUD from costing anything: with
-/// the HUD off screen, only the menu bar metric is read — it is the one readout
-/// that stays on screen over every desktop whether the HUD is there or not.
+/// the HUD off screen, only the menu bar metric is read — unless the monitor
+/// window is open, which is an independent reader and needs every metric it
+/// draws even when the HUD is excluded from the current Space.
 struct SamplingScopeTests {
     private func demand(
         columns: Bool,
         metric: StatusBarMetric,
-        history: Bool = false
+        monitor: Bool = false
     ) -> SamplingDemand {
         SamplingDemand(
             computeColumn: columns,
@@ -37,14 +38,14 @@ struct SamplingScopeTests {
             storageColumn: columns,
             networkColumn: columns,
             statusBarMetric: metric,
-            recordsHistory: history
+            monitorVisible: monitor
         )
     }
 
     @Test func awakeSamplesEverythingTheColumnsAskFor() {
         let f = Sampler.Flags.forTick(
             scope: .full,
-            demand: demand(columns: true, metric: .cpu, history: true)
+            demand: demand(columns: true, metric: .cpu)
         )
         #expect(f.collectGPU)
         #expect(f.collectCPU)
@@ -53,13 +54,17 @@ struct SamplingScopeTests {
         #expect(f.collectStorage)
         #expect(f.collectNetwork)
         #expect(f.collectThermal)
+        // The HUD only renders aggregate CPU; per-core and frequency are
+        // monitor-only work.
+        #expect(!f.collectPerCoreCPU)
+        #expect(!f.collectFrequency)
     }
 
     @Test func sleepingSamplesOnlyTheMenuBarMetric() {
         for metric in StatusBarMetric.allCases {
             let f = Sampler.Flags.forTick(
                 scope: .statusBarOnly,
-                demand: demand(columns: true, metric: metric, history: true)
+                demand: demand(columns: true, metric: metric)
             )
             let expected: (gpu: Bool, cpu: Bool, pwr: Bool, mem: Bool) = switch metric {
             case .gpu: (true, false, false, false)
@@ -75,10 +80,12 @@ struct SamplingScopeTests {
             #expect(!f.collectStorage)
             #expect(!f.collectNetwork)
             #expect(!f.collectThermal)
+            #expect(!f.collectPerCoreCPU)
+            #expect(!f.collectFrequency)
         }
     }
 
-    @Test func watchedColumnsAreReadEvenWhenHidden() {
+    @Test func menuBarMetricIsReadEvenWhenItsColumnIsHidden() {
         let f = Sampler.Flags.forTick(
             scope: .full,
             demand: demand(columns: false, metric: .memory)
@@ -92,16 +99,35 @@ struct SamplingScopeTests {
         #expect(!f.collectThermal)
     }
 
-    @Test func chartHistoryNeedsThermalOnlyWhileAwake() {
-        let awake = Sampler.Flags.forTick(
+    @Test func closedColumnsStillFeedTheMonitor() {
+        let f = Sampler.Flags.forTick(
             scope: .full,
-            demand: demand(columns: false, metric: .cpu, history: true)
+            demand: demand(columns: false, metric: .cpu, monitor: true)
         )
-        let asleep = Sampler.Flags.forTick(
+        #expect(f.collectGPU)
+        #expect(f.collectCPU)
+        #expect(f.collectMemory)
+        #expect(f.collectPower)
+        #expect(f.collectStorage)
+        #expect(f.collectNetwork)
+        #expect(f.collectThermal)
+        #expect(f.collectPerCoreCPU)
+        #expect(f.collectFrequency)
+    }
+
+    @Test func monitorKeepsSamplingWhileTheHUDisOnAnotherSpace() {
+        let f = Sampler.Flags.forTick(
             scope: .statusBarOnly,
-            demand: demand(columns: false, metric: .cpu, history: true)
+            demand: demand(columns: false, metric: .cpu, monitor: true)
         )
-        #expect(awake.collectThermal)
-        #expect(!asleep.collectThermal)
+        #expect(f.collectGPU)
+        #expect(f.collectCPU)
+        #expect(f.collectMemory)
+        #expect(f.collectPower)
+        #expect(f.collectStorage)
+        #expect(f.collectNetwork)
+        #expect(f.collectThermal)
+        #expect(f.collectPerCoreCPU)
+        #expect(f.collectFrequency)
     }
 }

@@ -65,6 +65,12 @@ enum MetricFormat {
         String(format: "%.1f", watts)
     }
 
+    /// Placeholder for an unavailable metric, padded to the same fixed field
+    /// width as the live value so the HUD columns do not jitter.
+    static func dash(_ width: Int) -> String {
+        pad("\u{2014}", to: width)
+    }
+
     private static func pad(_ s: String, to width: Int) -> String {
         if s.count >= width { return s }
         return String(repeating: " ", count: width - s.count) + s

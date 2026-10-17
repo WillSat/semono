@@ -13,10 +13,14 @@ enum SwapParser {
 
     /// Returns (total, used) in bytes, or (0, 0) on malformed input.
     static func usage(from buf: [CChar], size: Int) -> (total: UInt64, used: UInt64) {
-        guard size > 0 else { return (0, 0) }
+        // The caller normally passes outSize <= buf.count, but the parser must
+        // not index buf[0] or read past the valid region if a future caller
+        // passes a malformed size.
+        guard size > 0, size <= buf.count else { return (0, 0) }
 
-        if buf[0] == 0x74 /* 't' */ {
-            let str = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        let bytes = buf.prefix(size)
+        if bytes.first == 0x74 /* 't' */ {
+            let str = String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             return (UInt64(parseTextField(str, key: "total")), UInt64(parseTextField(str, key: "used")))
         }
 

@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let metrics = MetricsCollector()
     private var saveFrameTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
+    private var wakeObservers: [NSObjectProtocol] = []
 
     /// Debounce for persisting the HUD frame after drag/resize ends.
     private static let frameSaveDebounce: TimeInterval = 0.5
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startSpaceObservation()
         showHUD()
         metrics.start()
+        startWakeObservation()
         syncLoginItemState()
         observeMetrics()
         observeSettings()
@@ -62,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ aNotification: Notification) {
         metrics.stop()
         stopSpaceObservation()
+        stopWakeObservation()
     }
 
     @objc private func screenParamsChanged() {
@@ -165,6 +168,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         spaceObservers.removeAll()
         membershipSettle?.cancel()
         membershipSettle = nil
+    }
+
+    /// A sleep/wake or display-wake gap is not a valid measurement interval:
+    /// counters may have wrapped or reset and the elapsed time is huge. Reset
+    /// the rate baselines before the next tick instead of reporting a spike or
+    /// a false zero. Rates themselves use a monotonic clock, so a manual clock
+    /// change or NTP correction does not affect them.
+    private func startWakeObservation() {
+        let center = NSWorkspace.shared.notificationCenter
+        wakeObservers = [
+            center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.metrics.resetRateBaselinesSoon() }
+            },
+            center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.metrics.resetRateBaselinesSoon() }
+            },
+        ]
+    }
+
+    private func stopWakeObservation() {
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in wakeObservers { center.removeObserver(observer) }
+        wakeObservers.removeAll()
     }
 
     private func observeSettings() {
@@ -343,6 +369,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = MenubarContentView()
 
         let menu = NSMenu()
+        let monitorItem = NSMenuItem(
+            title: LocaleManager.shared.localized("Open Monitor"),
+            action: #selector(openDetail),
+            keyEquivalent: "m"
+        )
+        monitorItem.target = self
+        menu.addItem(monitorItem)
+
         let settingsItem = NSMenuItem(
             title: LocaleManager.shared.localized("Settings..."),
             action: #selector(openSettings),

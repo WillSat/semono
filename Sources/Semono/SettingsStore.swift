@@ -1,10 +1,30 @@
 import SwiftUI
 import ServiceManagement
 import AppKit
+import Combine
 
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
+
+    /// `@AppStorage` reads and writes UserDefaults, but an
+    /// `ObservableObject` does not automatically publish those writes to
+    /// SwiftUI. Bridge the defaults notification so views observing this
+    /// store (the HUD, the settings form) refresh immediately instead of
+    /// waiting for the next metric tick.
+    private var defaultsObserver: NSObjectProtocol?
+
+    private init() {
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.objectWillChange.send()
+            }
+        }
+    }
 
     /// Single source for default values. The `@AppStorage` declarations and
     /// `resetToDefaults` both reference these, so the two lists cannot drift.

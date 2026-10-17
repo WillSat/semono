@@ -9,12 +9,10 @@ struct HUDView: View {
         HStack(spacing: 0) {
             if settings.showComputeColumn {
                 VStack(spacing: 0) {
-                    valCell(label: "CPU", usage: metrics.cpuUsage,
-                            color: ColorScale.color(for: metrics.cpuUsage))
-                    valCell(label: "GPU", usage: metrics.gpuUsage,
-                            color: ColorScale.color(for: metrics.gpuUsage))
-                    MetricCell(label: "PWR", value: MetricFormat.power(metrics.powerUsage),
-                               color: .white.opacity(0.85))
+                    valCell(label: "CPU", usage: metrics.cpuUsage)
+                    valCell(label: "GPU", usage: metrics.gpuUsage)
+                    MetricCell(label: "PWR", value: optionalValue(metrics.powerUsage.map(MetricFormat.power), width: 4),
+                               color: metrics.powerUsage == nil ? .white.opacity(0.4) : .white.opacity(0.85))
                 }
             }
 
@@ -24,12 +22,10 @@ struct HUDView: View {
 
             if settings.showMemoryColumn {
                 VStack(spacing: 0) {
-                    valCell(label: "MEM", usage: metrics.memoryUsage,
-                            color: ColorScale.color(for: metrics.memoryUsage))
-                    BarCell(label: "PRS", ratio: levelRatio(metrics.memoryPressureLevel),
-                            color: ColorScale.color(forLevel: metrics.memoryPressureLevel))
-                    MetricCell(label: "SWAP", value: MetricFormat.swap(metrics.swapBytes),
-                               color: ColorScale.color(for: metrics.swapRatio))
+                    valCell(label: "MEM", usage: metrics.memoryUsage)
+                    pressureCell
+                    MetricCell(label: "SWAP", value: optionalValue(metrics.swapBytes.map(MetricFormat.swap), width: 4),
+                               color: metrics.swapBytes == nil ? .white.opacity(0.4) : ColorScale.color(for: metrics.swapRatio ?? 0))
                 }
             }
 
@@ -39,12 +35,11 @@ struct HUDView: View {
 
             if settings.showStorageColumn {
                 VStack(spacing: 0) {
-                    MetricCell(label: "DR", value: MetricFormat.speed(metrics.diskReadSpeed),
-                               color: .white.opacity(0.85))
-                    MetricCell(label: "DW", value: MetricFormat.speed(metrics.diskWriteSpeed),
-                               color: .white.opacity(0.85))
-                    BarCell(label: "THM", ratio: levelRatio(metrics.thermalState),
-                            color: ColorScale.color(forLevel: metrics.thermalState))
+                    MetricCell(label: "DR", value: optionalValue(metrics.diskReadSpeed.map(MetricFormat.speed), width: 5),
+                               color: metrics.diskReadSpeed == nil ? .white.opacity(0.4) : .white.opacity(0.85))
+                    MetricCell(label: "DW", value: optionalValue(metrics.diskWriteSpeed.map(MetricFormat.speed), width: 5),
+                               color: metrics.diskWriteSpeed == nil ? .white.opacity(0.4) : .white.opacity(0.85))
+                    thermalCell
                 }
             }
 
@@ -92,12 +87,41 @@ struct HUDView: View {
     // MARK: - Cells
 
     @ViewBuilder
-    private func valCell(label: String, usage: Double, color: Color) -> some View {
-        if settings.useBlockDisplay {
-            BarCell(label: label, ratio: usage, color: color)
+    private func valCell(label: String, usage: Double?) -> some View {
+        if let usage {
+            let color = ColorScale.color(for: usage)
+            if settings.useBlockDisplay {
+                BarCell(label: label, ratio: usage, color: color)
+            } else {
+                MetricCell(label: label, value: fmtPct(usage), color: color)
+            }
         } else {
-            MetricCell(label: label, value: fmtPct(usage), color: color)
+            MetricCell(label: label, value: MetricFormat.dash(4), color: .white.opacity(0.4))
         }
+    }
+
+    @ViewBuilder
+    private var pressureCell: some View {
+        if let level = metrics.memoryPressureLevel {
+            BarCell(label: "PRS", ratio: levelRatio(level),
+                    color: ColorScale.color(forLevel: level))
+        } else {
+            MetricCell(label: "PRS", value: MetricFormat.dash(4), color: .white.opacity(0.4))
+        }
+    }
+
+    @ViewBuilder
+    private var thermalCell: some View {
+        if let level = metrics.thermalState {
+            BarCell(label: "THM", ratio: levelRatio(level),
+                    color: ColorScale.color(forLevel: level))
+        } else {
+            MetricCell(label: "THM", value: MetricFormat.dash(4), color: .white.opacity(0.4))
+        }
+    }
+
+    private func optionalValue(_ value: String?, width: Int) -> String {
+        value ?? MetricFormat.dash(width)
     }
 
     private func MetricCell(label: String, value: String, color: Color) -> some View {
@@ -135,42 +159,49 @@ struct HUDView: View {
 
     @ViewBuilder
     private var connCell: some View {
-        if metrics.networkType == "WiFi" {
-            HStack(spacing: 0) {
-                Text(metrics.networkType)
-                    .font(.custom(currentFont, size: labelFontSz))
-                    .foregroundColor(.white.opacity(0.4))
-                Spacer(minLength: minSpacer)
-                if metrics.wifiRSSI == 0 {
-                    // rssiValue() == 0 means "unavailable", not 0 dBm.
-                    Text("  \u{2014}")
-                        .font(.custom(currentFont, size: valueFontSz))
+        if let type = metrics.networkType {
+            if type == "WiFi" {
+                HStack(spacing: 0) {
+                    Text(type)
+                        .font(.custom(currentFont, size: labelFontSz))
                         .foregroundColor(.white.opacity(0.4))
-                } else {
-                    Text(String(format: "%3d", metrics.wifiRSSI))
-                        .font(.custom(currentFont, size: valueFontSz))
-                        .foregroundColor(ColorScale.color(forRSSI: metrics.wifiRSSI))
-                        .monospacedDigit()
+                    Spacer(minLength: minSpacer)
+                    if let rssi = metrics.wifiRSSI {
+                        Text(String(format: "%3d", rssi))
+                            .font(.custom(currentFont, size: valueFontSz))
+                            .foregroundColor(ColorScale.color(forRSSI: rssi))
+                            .monospacedDigit()
+                    } else {
+                        // rssiValue() == 0 means "unavailable", not 0 dBm.
+                        Text("  \u{2014}")
+                            .font(.custom(currentFont, size: valueFontSz))
+                            .foregroundColor(.white.opacity(0.4))
+                    }
                 }
+                .frame(height: cellHeight)
+            } else {
+                Text(type)
+                    .font(.custom(currentFont, size: valueFontSz))
+                    .foregroundColor(.white.opacity(0.7))
+                    .frame(height: cellHeight)
             }
-            .frame(height: cellHeight)
         } else {
-            Text(metrics.networkType)
+            Text("\u{2014}")
                 .font(.custom(currentFont, size: valueFontSz))
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(.white.opacity(0.4))
                 .frame(height: cellHeight)
         }
     }
 
-    private func speedCell(arrow: String, speed: Double) -> some View {
+    private func speedCell(arrow: String, speed: Double?) -> some View {
         HStack(spacing: 0) {
             Text(arrow)
                 .font(.custom(currentFont, size: valueFontSz))
                 .foregroundColor(Color(red: 0.70, green: 0.55, blue: 0.92))
             Spacer(minLength: minSpacer)
-            Text(MetricFormat.speed(speed))
+            Text(speed.map(MetricFormat.speed) ?? MetricFormat.dash(5))
                 .font(.custom(currentFont, size: valueFontSz))
-                .foregroundColor(.white.opacity(0.85))
+                .foregroundColor(speed == nil ? .white.opacity(0.4) : .white.opacity(0.85))
                 .monospacedDigit()
                 .lineLimit(1)
         }

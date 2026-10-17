@@ -6,28 +6,30 @@ final class MetricsHistory: ObservableObject {
     static let maxDataPoints = 30
 
     /// One recorded reading. Equality is delegated to the sample so identical
-    /// readings collapse into one history point (see `record`).
+    /// readings collapse into one history point (see `record`). A nil value
+    /// means the sensor was unavailable for that tick; charts render a gap and
+    /// cards render a dash instead of a fabricated zero.
     struct Snapshot: Equatable {
         let timestamp: Date
         let sample: Sampler.Sample
 
         // Forwarding accessors keep the view call sites unchanged; adding a
         // metric only touches `Sample` and these properties.
-        var cpuUsage: Double { sample.cpuUsage }
+        var cpuUsage: Double? { sample.cpuUsage }
         var perCoreCPU: [Double] { sample.perCoreCPU }
         var perCoreFreqMHz: [Double] { sample.perCoreFreqMHz }
-        var gpuUsage: Double { sample.gpuUsage }
-        var powerUsage: Double { sample.powerUsage }
-        var memoryUsage: Double { sample.memoryUsage }
-        var swapBytes: UInt64 { sample.swapBytes }
-        var swapRatio: Double { sample.swapRatio }
-        var memoryPressureLevel: Int { sample.memoryPressureLevel }
-        var diskReadSpeed: Double { sample.diskReadSpeed }
-        var diskWriteSpeed: Double { sample.diskWriteSpeed }
-        var thermalState: Int { sample.thermalState }
-        var downloadSpeed: Double { sample.downloadSpeed }
-        var uploadSpeed: Double { sample.uploadSpeed }
-        var wifiRSSI: Int { sample.wifiRSSI }
+        var gpuUsage: Double? { sample.gpuUsage }
+        var powerUsage: Double? { sample.powerUsage }
+        var memoryUsage: Double? { sample.memoryUsage }
+        var swapBytes: UInt64? { sample.swapBytes }
+        var swapRatio: Double? { sample.swapRatio }
+        var memoryPressureLevel: Int? { sample.memoryPressureLevel }
+        var diskReadSpeed: Double? { sample.diskReadSpeed }
+        var diskWriteSpeed: Double? { sample.diskWriteSpeed }
+        var thermalState: Int? { sample.thermalState }
+        var downloadSpeed: Double? { sample.downloadSpeed }
+        var uploadSpeed: Double? { sample.uploadSpeed }
+        var wifiRSSI: Int? { sample.wifiRSSI }
     }
 
     @Published var snapshots: [Snapshot] = []
@@ -60,19 +62,31 @@ final class MetricsHistory: ObservableObject {
     }
 
     private func appendColumns(from snap: Snapshot) {
-        // New columns start padded with the existing history so every column
-        // stays aligned with `snapshots`.
-        while perCoreCPUColumns.count < snap.perCoreCPU.count {
-            perCoreCPUColumns.append(Array(repeating: 0, count: snapshots.count - 1))
+        // A sample without per-core data (first tick, read failure, or a
+        // closed monitor) must not append fabricated zeros to existing
+        // columns. Clear that series instead; the next real sample starts a
+        // fresh column set. CPU and frequency are handled independently so an
+        // Intel Mac with no frequency data can still chart per-core CPU.
+        if snap.perCoreCPU.isEmpty {
+            perCoreCPUColumns = []
+        } else {
+            while perCoreCPUColumns.count < snap.perCoreCPU.count {
+                perCoreCPUColumns.append([])
+            }
+            for i in perCoreCPUColumns.indices {
+                perCoreCPUColumns[i].append(i < snap.perCoreCPU.count ? snap.perCoreCPU[i] : 0)
+            }
         }
-        while perCoreFreqColumns.count < snap.perCoreFreqMHz.count {
-            perCoreFreqColumns.append(Array(repeating: 0, count: snapshots.count - 1))
-        }
-        for i in perCoreCPUColumns.indices {
-            perCoreCPUColumns[i].append(i < snap.perCoreCPU.count ? snap.perCoreCPU[i] : 0)
-        }
-        for i in perCoreFreqColumns.indices {
-            perCoreFreqColumns[i].append(i < snap.perCoreFreqMHz.count ? snap.perCoreFreqMHz[i] : 0)
+
+        if snap.perCoreFreqMHz.isEmpty {
+            perCoreFreqColumns = []
+        } else {
+            while perCoreFreqColumns.count < snap.perCoreFreqMHz.count {
+                perCoreFreqColumns.append([])
+            }
+            for i in perCoreFreqColumns.indices {
+                perCoreFreqColumns[i].append(i < snap.perCoreFreqMHz.count ? snap.perCoreFreqMHz[i] : 0)
+            }
         }
     }
 }

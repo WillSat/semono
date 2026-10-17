@@ -4,20 +4,26 @@ import Darwin
 
 // Resident stats daemon. Reads one request per line from stdin:
 //
-//     gpu    -> "gpu 0..100"                        (percent)
-//     power  -> "power milliwatts"                  (AppleSmartBattery PowerTelemetryData SystemLoad)
-//     disk   -> "disk readBytes writeBytes"         (aggregated across ALL block storage drivers)
-//     all    -> "all gpuPercent mW readBytes writeBytes"
+//     <id> gpu    -> "<id> gpu 2 0..100"              (percent, or na)
+//     <id> power  -> "<id> power 2 milliwatts"         (or na)
+//     <id> disk   -> "<id> disk 2 readBytes writeBytes" (or na na)
+//     <id> all    -> "<id> all 2 gpuPercent mW readBytes writeBytes"
+//     <id> hello  -> "<id> hello 2"
 //
-// Responses echo the request word, so the parent can tell a late response
-// (from a request it already cancelled) apart from the one it is waiting for.
-// Prints exactly one response line and flushes. Exits when stdin closes
-// (the parent app quitting closes the pipe, so the helper self-cleans).
+// Values are numbers or the literal "na". The id and protocol version are part
+// of every response: the app can tell a late answer to a cancelled request
+// from the answer to the current one, and an app/helper version mismatch fails
+// visibly instead of being silently parsed as zeros.
+//
+// Prints exactly one response line and flushes. Exits when stdin closes (the
+// parent app quitting closes the pipe, so the helper self-cleans).
 
 // If the parent closes stdout while stdin is still open, print() must fail
 // with an error instead of SIGPIPE killing this process — a signal death
 // would read as a spurious EOF plus a respawn backoff on the parent side.
 signal(SIGPIPE, SIG_IGN)
+
+let protocolVersion = 2
 
 // MARK: - GPU
 
@@ -25,19 +31,21 @@ func gpuUsage() -> String {
     guard let dict = firstServiceProperties(matchingService: "IOAccelerator"),
           let perfStats = dict["PerformanceStatistics"] as? [String: Any],
           let gpuUtil = perfStats["Device Utilization %"] as? NSNumber
-    else { return "0" }
+    else { return "na" }
     return gpuUtil.stringValue
 }
 
 // MARK: - Power
 
 /// Apple Silicon system power draw in milliwatts (verified against live
-/// readings: idle laptops report a few thousand mW).
-func powerLoad() -> String {
+/// readings: idle laptops report a few thousand mW). Machines without an
+/// AppleSmartBattery — desktops, some Intel models — return nil, which the
+/// app renders as unavailable rather than 0 W.
+func powerLoad() -> String? {
     guard let dict = firstServiceProperties(matchingService: "AppleSmartBattery"),
           let tele = dict["PowerTelemetryData"] as? [String: Any],
           let load = tele["SystemLoad"] as? NSNumber
-    else { return "0" }
+    else { return nil }
     return load.stringValue
 }
 
@@ -48,26 +56,31 @@ func powerLoad() -> String {
 /// The request loop below is strictly single-threaded, so the cache needs no
 /// synchronization; top-level vars in a main file default to MainActor, so
 /// opt out explicitly.
-nonisolated(unsafe) var cachedPower = (value: "0", date: Date.distantPast)
+nonisolated(unsafe) var cachedPower = (value: "na", time: UInt64(0))
 
 func powerLoadCached() -> String {
-    if Date().timeIntervalSince(cachedPower.date) < 2.0 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    if cachedPower.time != 0, now >= cachedPower.time,
+       now - cachedPower.time < 2_000_000_000 {
         return cachedPower.value
     }
-    let value = powerLoad()
-    cachedPower = (value, Date())
+    let value = powerLoad() ?? "na"
+    cachedPower = (value, now)
     return value
 }
 
 // MARK: - Disk
 
 /// Sums Bytes (Read)/Bytes (Write) across every IOBlockStorageDriver so the
-/// reading covers the whole system, not just the first drive.
+/// reading covers the whole system, not just the first drive. If no driver
+/// exposes statistics, returns "na na" instead of "0 0": a real zero counter
+/// is valid at boot, while a failed read must not reset the parent's baseline
+/// and produce a spike on the next successful sample.
 func diskBytes() -> String {
     var iterator: io_iterator_t = 0
     guard IOServiceGetMatchingServices(0, IOServiceMatching("IOBlockStorageDriver"), &iterator) == KERN_SUCCESS,
           iterator != 0
-    else { return "0 0" }
+    else { return "na na" }
     defer { IOObjectRelease(iterator) }
 
     var totalRead: UInt64 = 0
@@ -89,7 +102,7 @@ func diskBytes() -> String {
         }
         entry = IOIteratorNext(iterator)
     }
-    return found ? "\(totalRead) \(totalWrite)" : "0 0"
+    return found ? "\(totalRead) \(totalWrite)" : "na na"
 }
 
 // MARK: - Shared
@@ -115,12 +128,28 @@ func firstServiceProperties(matchingService className: String) -> [String: Any]?
 // MARK: - Request loop
 
 while let line = readLine() {
-    switch line {
-    case "gpu":   print("gpu \(gpuUsage())")
-    case "power": print("power \(powerLoadCached())")
-    case "disk":  print("disk \(diskBytes())")
-    case "all":   print("all \(gpuUsage()) \(powerLoadCached()) \(diskBytes())")
-    default:      print("0")
+    let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+    guard parts.count >= 2, let id = UInt64(parts[0]) else {
+        // There is no id to echo, so a malformed request cannot be correlated;
+        // the app will time out and restart the helper. Keep the line short.
+        print("malformed")
+        fflush(stdout)
+        continue
+    }
+    let command = String(parts[1])
+    switch command {
+    case "gpu":
+        print("\(id) gpu \(protocolVersion) \(gpuUsage())")
+    case "power":
+        print("\(id) power \(protocolVersion) \(powerLoadCached())")
+    case "disk":
+        print("\(id) disk \(protocolVersion) \(diskBytes())")
+    case "all":
+        print("\(id) all \(protocolVersion) \(gpuUsage()) \(powerLoadCached()) \(diskBytes())")
+    case "hello":
+        print("\(id) hello \(protocolVersion)")
+    default:
+        print("\(id) \(command) \(protocolVersion) err")
     }
     fflush(stdout)
 }

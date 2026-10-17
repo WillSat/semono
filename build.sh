@@ -33,19 +33,35 @@ if [ ! -f "$BIN_PATH" ]; then
 fi
 
 # Versioning: the release workflow tags before building, so the latest tag is
-# the version being shipped. CFBundleVersion follows the project convention
-# 2 × minor-version plus the patch number (v1.10 shipped build 20, v1.9.1
-# build 19), so it keeps increasing across releases. Falls back to fixed
-# values outside a git checkout.
-VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    VERSION="1.10"
+# the marketing version being shipped. CFBundleVersion is a separate monotonic
+# build number — a commit count (or CI_BUILD_NUMBER) — so v1.13.2 and v1.14.0
+# cannot collide and patch releases sort after the minor they patch.
+#
+# The previous scheme accepted only x.y and derived 2*minor+patch; a v1.9.1
+# tag fell back to 1.10, and patch >= 2 collided with the next minor.
+VERSION_RAW=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+VERSION="${VERSION_RAW#v}"
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    VERSION="0.0.0"
+    echo "==> warning: no vX.Y[.Z] tag found; using ${VERSION}" >&2
 fi
-BASE_NUM=$(echo "$VERSION" | awk -F. '{print $2}')
-PATCH_NUM=$(echo "$VERSION" | awk -F. '{print ($3 == "" ? 0 : $3)}')
-BUILD_NUM=$((2 * BASE_NUM + PATCH_NUM))
-if ! [[ "$BUILD_NUM" =~ ^[0-9]+$ ]] || [ "$BUILD_NUM" -lt 20 ]; then
-    BUILD_NUM=20
+
+if [ "$BUILD_CONFIG" = "release" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "==> error: release build from a dirty worktree; commit or stash first" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "${BUILD_NUMBER:-}" ]; then
+    BUILD_NUM="$BUILD_NUMBER"
+else
+    # Offset above the legacy 2*minor+patch builds (v1.13 shipped build 26)
+    # so an update from the old scheme is still seen as newer by the system.
+    BUILD_NUM=$((1000 + $(git rev-list --count HEAD 2>/dev/null || echo 1)))
+fi
+if ! [[ "$BUILD_NUM" =~ ^[0-9]+$ ]] || [ "$BUILD_NUM" -lt 1 ]; then
+    BUILD_NUM=1
 fi
 echo "==> Version: ${VERSION} (${BUILD_NUM})"
 
@@ -60,8 +76,9 @@ cp "$BIN_PATH" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 # A release bundle without it would silently ship zero-valued metrics, so
 # that combination is a hard error.
 HELPER_PATH="${BIN_DIR}/stats_helper"
+HELPER_DST="${BUNDLE_DIR}/Contents/MacOS/stats_helper"
 if [ -f "$HELPER_PATH" ]; then
-    cp "$HELPER_PATH" "${BUNDLE_DIR}/Contents/MacOS/stats_helper"
+    cp "$HELPER_PATH" "$HELPER_DST"
 elif [ "$BUILD_CONFIG" = "release" ]; then
     echo "==> error: stats_helper binary not found" >&2
     exit 1
@@ -92,6 +109,18 @@ if [ -f "Sources/${APP_NAME}/Resources/DepartureMono-Regular.otf" ]; then
     cp "Sources/${APP_NAME}/Resources/DepartureMono-Regular.otf" "${BUNDLE_DIR}/Contents/Resources/"
 fi
 
+# Smoke-test the resident helper's protocol before signing the bundle. A
+# release with a helper that cannot answer `hello` would silently ship
+# unavailable GPU/power/disk readings.
+if [ -x "$HELPER_DST" ]; then
+    HELLO=$(printf '1 hello\n' | "$HELPER_DST" 2>/dev/null | head -1 || true)
+    if [ "$HELLO" != "1 hello 2" ]; then
+        echo "==> error: stats_helper protocol smoke test failed (got: ${HELLO:-nothing})" >&2
+        exit 1
+    fi
+    echo "==> stats_helper protocol OK"
+fi
+
 cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -103,6 +132,8 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
     <string>com.semono.app</string>
     <key>CFBundleName</key>
     <string>Semono</string>
+    <key>CFBundleDisplayName</key>
+    <string>Semono</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -113,6 +144,8 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
     <string>26.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>CFBundleIconFile</key>
@@ -121,13 +154,28 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# Ad-hoc code sign the bundle (required for SMAppService launch-at-login;
-# replace with a proper Developer ID signature for distribution)
-if codesign --force --deep --sign - "${BUNDLE_DIR}" >/dev/null 2>&1; then
-    echo "==> Ad-hoc codesigned"
+# Sign the bundle. Ad-hoc signing is enough for local runs, but SMAppService
+# login items and Gatekeeper distribution need a Developer ID Application
+# identity with Hardened Runtime. Sign the nested helper first, then the app;
+# `--deep` is kept for the ad-hoc path only.
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+if [ -n "$SIGN_IDENTITY" ]; then
+    echo "==> Signing with Developer ID: ${SIGN_IDENTITY}"
+    if [ -f "$HELPER_DST" ]; then
+        codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$HELPER_DST"
+    fi
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "${BUNDLE_DIR}"
 else
-    echo "==> warning: ad-hoc codesign failed"
+    if ! codesign --force --deep --sign - "${BUNDLE_DIR}" >/dev/null 2>&1; then
+        echo "==> error: ad-hoc codesign failed" >&2
+        exit 1
+    fi
+    echo "==> Ad-hoc codesigned (set SIGN_IDENTITY for a Developer ID build)"
 fi
+
+plutil -lint "${BUNDLE_DIR}/Contents/Info.plist"
+codesign --verify --deep --strict "${BUNDLE_DIR}"
+echo "==> Signature verified"
 
 echo "==> App bundle created at ${BUNDLE_DIR}"
 echo "==> Run: open ${BUNDLE_DIR}"

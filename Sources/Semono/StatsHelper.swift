@@ -13,6 +13,11 @@ import os
 /// short pipe write performed while holding the lock, so a timeout firing
 /// mid-write cannot tear the request down first.
 ///
+/// Every request carries a monotonically increasing id. Responses echo that
+/// id, so a late answer to a cancelled request cannot be mistaken for the
+/// answer to a new request with the same command word. All complete lines in
+/// one pipe chunk are drained, not just the first one.
+///
 /// All state is guarded by `lock`. The readability handler is dispatched on
 /// its own queue and may interleave with request submission, so it captures
 /// the process it belongs to and only mutates state while that process is
@@ -33,19 +38,22 @@ final class StatsHelper: @unchecked Sendable {
     /// handler and the post-registration re-check tell "our" request apart
     /// from one that was already claimed or replaced.
     private var pendingToken: QueryToken?
-    /// Command word the in-flight request is waiting for. Responses echo it,
-    /// so a late line from a cancelled request is dropped instead of being
-    /// attributed to the newer request.
+    /// The request id and command word the in-flight request is waiting for.
+    /// A stale response with an older id is dropped even when its command word
+    /// matches the current request.
+    private var pendingID: UInt64?
     private var pendingCommand: String?
-    private var buffer = Data()
+    private var nextRequestID: UInt64 = 0
+    private var lineBuffer = LineBuffer()
     private let logger = Logger(subsystem: "com.semono.app", category: "stats_helper")
     private var warnedSpawn = false
     private var warnedHang = false
+    private var warnedProtocol = false
     /// When the helper died (crash, kill, EOF). A fresh death suppresses
     /// respawns for a short backoff so a helper that dies on launch is not
     /// respawned — and logged about — on every tick.
-    private var lastHelperDeath: Date?
-    private static let respawnBackoff: TimeInterval = 10
+    private var lastHelperDeath: UInt64?
+    private static let respawnBackoff: UInt64 = 10_000_000_000
 
     private init() {}
 
@@ -57,10 +65,14 @@ final class StatsHelper: @unchecked Sendable {
         return body()
     }
 
-    /// Sends one request line and returns the response line. Returns ""
+    /// Sends one request line and returns the response payload. Returns ""
     /// when the helper cannot be launched, times out, dies, or the calling
     /// task is cancelled.
     func query(_ name: String, timeout: TimeInterval = 2.0) async -> String {
+        let requestID: UInt64 = withLock {
+            nextRequestID &+= 1
+            return nextRequestID
+        }
         let token = QueryToken()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { cont in
@@ -74,8 +86,14 @@ final class StatsHelper: @unchecked Sendable {
 
                 let outcome: Outcome = withLock {
                     if process == nil || !(process?.isRunning ?? false) {
-                        if let death = lastHelperDeath,
-                           Date().timeIntervalSince(death) < Self.respawnBackoff {
+                        let now = DispatchTime.now().uptimeNanoseconds
+                        let inBackoff: Bool
+                        if let death = lastHelperDeath, now >= death {
+                            inBackoff = now - death < Self.respawnBackoff
+                        } else {
+                            inBackoff = false
+                        }
+                        if inBackoff {
                             // The helper just died; skip the spawn this tick.
                             return .rejected
                         }
@@ -84,12 +102,13 @@ final class StatsHelper: @unchecked Sendable {
                     guard let proc = process, proc.isRunning, pending == nil else {
                         if process == nil {
                             warnOnce(flag: &warnedSpawn,
-                                     message: "stats_helper could not be launched; GPU/power/disk will read 0")
+                                     message: "stats_helper could not be launched; GPU/power/disk will read unavailable")
                         }
                         return .rejected
                     }
                     pending = cont
                     pendingToken = token
+                    pendingID = requestID
                     pendingCommand = name
 
                     let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -110,6 +129,7 @@ final class StatsHelper: @unchecked Sendable {
                         if pendingToken === token {
                             pending = nil
                             pendingToken = nil
+                            pendingID = nil
                             pendingCommand = nil
                             pendingTimer = nil
                             timer.cancel()
@@ -121,7 +141,8 @@ final class StatsHelper: @unchecked Sendable {
                     // The write happens under the lock so a timeout firing
                     // mid-write cannot tear the request down first.
                     do {
-                        try writeHandle?.write(contentsOf: Data((name + "\n").utf8))
+                        let request = HelperProtocol.request(id: requestID, command: name)
+                        try writeHandle?.write(contentsOf: Data(request.utf8))
                         return .registered
                     } catch {
                         // The helper died between the running check and the write.
@@ -131,6 +152,7 @@ final class StatsHelper: @unchecked Sendable {
                         pendingTimer = nil
                         pending = nil
                         pendingToken = nil
+                        pendingID = nil
                         pendingCommand = nil
                         return .writeFailed(proc, timer)
                     }
@@ -151,13 +173,14 @@ final class StatsHelper: @unchecked Sendable {
             // Resumes an in-flight request promptly when the caller is
             // cancelled instead of leaving the task suspended until the
             // timeout. Only claims the request while it is still ours. The
-            // helper is left running: its late response is dropped (pending
-            // is nil), so the line protocol stays in sync.
+            // helper is left running: its late response is dropped by id, so
+            // the line protocol stays in sync.
             let claimed: (timer: DispatchSourceTimer?, cont: CheckedContinuation<String, Never>?)? = withLock {
                 guard pendingToken === token else { return nil }
                 let cont = pending
                 pending = nil
                 pendingToken = nil
+                pendingID = nil
                 pendingCommand = nil
                 let timer = pendingTimer
                 pendingTimer = nil
@@ -177,10 +200,11 @@ final class StatsHelper: @unchecked Sendable {
             if let h = readHandle { h.readabilityHandler = nil }
             readHandle = nil
             writeHandle = nil
-            buffer = Data()
+            lineBuffer.reset()
             let cont = pending
             pending = nil
             pendingToken = nil
+            pendingID = nil
             pendingCommand = nil
             let timer = pendingTimer
             pendingTimer = nil
@@ -208,6 +232,7 @@ final class StatsHelper: @unchecked Sendable {
             if alive {
                 pending = nil
                 pendingToken = nil
+                pendingID = nil
                 pendingCommand = nil
                 warnOnce(flag: &warnedHang,
                          message: "stats_helper did not answer in time; restarting it")
@@ -232,15 +257,26 @@ final class StatsHelper: @unchecked Sendable {
         if let h = readHandle { h.readabilityHandler = nil }
         readHandle = nil
         writeHandle = nil
-        buffer = Data()
+        lineBuffer.reset()
 
         let name = "stats_helper"
-        var url = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(name)")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            // Debug runs (`swift run`) place the helper next to the executable.
-            url = Bundle.main.bundleURL.appendingPathComponent(name)
+        // App bundle first, then the directory next to the running executable
+        // (covers `swift run` and `swift test`, where Bundle.main is not the
+        // .app). A release bundle without the helper is a packaging error, but
+        // the sampler still fails soft and reports unavailable values.
+        var candidates: [URL] = []
+        // Explicit override for integration tests and debugging a helper built
+        // outside the app bundle.
+        if let override = ProcessInfo.processInfo.environment["SEMONO_STATS_HELPER"],
+           !override.isEmpty {
+            candidates.append(URL(fileURLWithPath: override))
         }
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(name)"))
+        candidates.append(Bundle.main.bundleURL.appendingPathComponent(name))
+        if let executable = Bundle.main.executableURL?.deletingLastPathComponent() {
+            candidates.append(executable.appendingPathComponent(name))
+        }
+        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
             process = nil
             return
         }
@@ -275,47 +311,60 @@ final class StatsHelper: @unchecked Sendable {
                     guard let proc = self.process, proc === task else {
                         return .ignore
                     }
-                    self.lastHelperDeath = Date()
+                    self.lastHelperDeath = DispatchTime.now().uptimeNanoseconds
                     handle.readabilityHandler = nil
                     self.process = nil
                     self.readHandle = nil
                     self.writeHandle = nil
-                    self.buffer = Data()
+                    self.lineBuffer.reset()
                     let cont = self.pending
                     self.pending = nil
                     self.pendingToken = nil
+                    self.pendingID = nil
                     self.pendingCommand = nil
                     let timer = self.pendingTimer
                     self.pendingTimer = nil
                     return .eof(cont, timer)
                 }
-                self.buffer.append(data)
-                guard let nl = self.buffer.firstIndex(of: 0x0A) else {
-                    return .ignore
+
+                self.lineBuffer.append(data)
+                var payload: String?
+                var cont: CheckedContinuation<String, Never>?
+                var timer: DispatchSourceTimer?
+
+                // Drain every complete line in this chunk. This handles a
+                // stale response and the current one arriving together, and
+                // keeps the buffer from blocking the next request.
+                while let line = self.lineBuffer.nextLine() {
+                    guard !line.isEmpty else { continue }
+                    guard let response = HelperProtocol.parseResponse(line) else {
+                        self.warnProtocolLocked()
+                        continue
+                    }
+                    guard let pendingID = self.pendingID,
+                          response.id == pendingID,
+                          response.command == self.pendingCommand
+                    else { continue }
+
+                    // A real response means the helper is healthy again; re-arm
+                    // the once-only warnings for a future failure episode.
+                    self.warnedSpawn = false
+                    self.warnedHang = false
+                    self.warnedProtocol = false
+                    payload = response.payload
+                    cont = self.pending
+                    timer = self.pendingTimer
+                    self.pending = nil
+                    self.pendingToken = nil
+                    self.pendingID = nil
+                    self.pendingCommand = nil
+                    self.pendingTimer = nil
                 }
-                let line = String(data: Data(self.buffer[..<nl]), encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                self.buffer = Data(self.buffer[(nl + 1)...])
-                // A real response means the helper is healthy again; re-arm
-                // the once-only warnings for a future failure episode.
-                self.warnedSpawn = false
-                self.warnedHang = false
-                // Responses echo the request word; a line from a request that
-                // was already cancelled belongs to nobody — drop it and keep
-                // waiting for the current request's line.
-                guard let space = line.firstIndex(of: " "),
-                      let command = self.pendingCommand,
-                      line[..<space] == command else {
-                    return .ignore
+
+                if let payload, let cont {
+                    return .line(payload, cont, timer)
                 }
-                let payload = String(line[line.index(after: space)...])
-                let cont = self.pending
-                self.pending = nil
-                self.pendingToken = nil
-                self.pendingCommand = nil
-                let timer = self.pendingTimer
-                self.pendingTimer = nil
-                return .line(payload, cont, timer)
+                return .ignore
             }
             switch result {
             case .ignore:
@@ -328,6 +377,15 @@ final class StatsHelper: @unchecked Sendable {
                 cont?.resume(returning: payload)
             }
         }
+    }
+
+    /// Logs a protocol mismatch once per failure episode. An old helper sends
+    /// `gpu 12` instead of the id/version envelope; the request then times
+    /// out and is respawned, but the log points at the actual cause.
+    private func warnProtocolLocked() {
+        guard !warnedProtocol else { return }
+        warnedProtocol = true
+        logger.error("stats_helper protocol mismatch; rebuild/reinstall the bundled helper")
     }
 
     /// Terminates the helper; Foundation's Process reaps it on exit.

@@ -55,6 +55,12 @@ struct SwapParserTests {
         #expect(SwapParser.usage(from: [], size: 0) == (0, 0))
     }
 
+    @Test func sizeBeyondBufferIsRejectedWithoutIndexing() {
+        #expect(SwapParser.usage(from: [], size: 1) == (0, 0))
+        let tiny = Array("total = 1.00M".utf8).map { CChar(bitPattern: $0) }
+        #expect(SwapParser.usage(from: tiny, size: tiny.count + 10) == (0, 0))
+    }
+
     @Test func outOfBoundsReadReturnsZero() {
         let data = Data([0x01, 0x02, 0x03])
         #expect(SwapParser.leUInt64(data, at: 0) == 0)

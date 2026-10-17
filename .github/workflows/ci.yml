@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Swift 6.2+ and the SwiftUI macro plugin require an Xcode toolchain;
+    # CommandLineTools alone cannot compile this package.
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Build app bundle
+        run: ./build.sh debug
+
+      - name: Verify bundle
+        run: |
+          plutil -lint .build/Semono.app/Contents/Info.plist
+          codesign --verify --deep --strict .build/Semono.app
+          test -x .build/Semono.app/Contents/MacOS/stats_helper
+          printf '1 hello\n' | .build/Semono.app/Contents/MacOS/stats_helper

@@ -66,6 +66,7 @@ final class LocaleManager: ObservableObject {
         "Launch at Login Failed": "开机启动失败",
         "Login item failed to register. It may require a properly signed build.": "登录启动项注册失败，可能需要使用已正确签名的构建版本。",
         "General": "通用",
+        "Open Monitor": "打开监控",
         "Settings...": "设置...",
         "Quit Semono": "退出 Semono",
         "Language": "语言",

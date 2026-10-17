@@ -124,7 +124,7 @@ struct DetailView: View {
                             title: "CPU \(i)",
                             icon: nil,
                             unit: "",
-                            values: history.perCoreCPUColumns[i],
+                            values: history.perCoreCPUColumns[i].map { Optional($0) },
                             maxY: 1.0,
                             format: { String(format: "%.0f%%", $0 * 100) },
                             compact: true
@@ -141,7 +141,7 @@ struct DetailView: View {
                             title: "Freq \(i)",
                             icon: nil,
                             unit: "MHz",
-                            values: history.perCoreFreqColumns[i],
+                            values: history.perCoreFreqColumns[i].map { Optional($0) },
                             format: { String(format: "%.0f", $0) },
                             compact: true
                         )
@@ -180,21 +180,19 @@ struct DetailView: View {
                     title: locale.localized("Swap Usage"),
                     icon: "arrow.triangle.2.circlepath",
                     unit: "",
-                    values: history.snapshots.map { Double($0.swapBytes) },
+                    values: history.snapshots.map { $0.swapBytes.map(Double.init) },
                     format: MetricFormat.bytesCompact,
-                    latestText: history.snapshots.last.map { MetricFormat.bytesCompact(Double($0.swapBytes)) }
+                    latestText: history.snapshots.last?.swapBytes.map { MetricFormat.bytesCompact(Double($0)) }
                 )
 
                 MetricChart(
                     title: locale.localized("Memory Pressure"),
                     icon: "gauge",
                     unit: "",
-                    values: history.snapshots.map { Double(clampLevel($0.memoryPressureLevel) + 1) / 4.0 },
+                    values: history.snapshots.map { $0.memoryPressureLevel.map { Double(clampLevel($0)) / 3.0 } },
                     maxY: 1.0,
                     format: { _ in "" },
-                    latestText: history.snapshots.last.map {
-                        ["N", "M", "H", "C"][clampLevel($0.memoryPressureLevel)]
-                    },
+                    latestText: pressureText(history.snapshots.last?.memoryPressureLevel ?? nil),
                     showStats: false
                 )
             }
@@ -242,10 +240,10 @@ struct DetailView: View {
                 title: locale.localized("WiFi RSSI"),
                 icon: "wifi",
                 unit: "dBm",
-                values: history.snapshots.map { ColorScale.normalizedRSSI($0.wifiRSSI) },
+                values: history.snapshots.map { $0.wifiRSSI.map(ColorScale.normalizedRSSI) },
                 maxY: 1.0,
                 format: { _ in "" },
-                latestText: history.snapshots.last.map { $0.wifiRSSI == 0 ? "\u{2014}" : "\($0.wifiRSSI)" },
+                latestText: rssiText(history.snapshots.last?.wifiRSSI ?? nil),
                 showStats: false
             )
         }
@@ -258,13 +256,10 @@ struct DetailView: View {
                 icon: "thermometer.medium",
                 title: locale.localized("Thermal State"),
                 unit: "",
-                values: history.snapshots.map { Double(clampLevel($0.thermalState) + 1) / 4.0 },
+                values: history.snapshots.map { $0.thermalState.map { Double(clampLevel($0)) / 3.0 } },
                 maxY: 1.0,
                 format: { _ in "" },
-                latestText: history.snapshots.last.map {
-                    [locale.localized("Nominal"), locale.localized("Moderate"),
-                     locale.localized("Heavy"), locale.localized("Critical")][clampLevel($0.thermalState)]
-                },
+                latestText: thermalText(history.snapshots.last?.thermalState ?? nil),
                 showStats: false
             )
 
@@ -284,6 +279,24 @@ struct DetailView: View {
 
     private func clampLevel(_ level: Int) -> Int {
         min(3, max(0, level))
+    }
+
+    private func pressureText(_ level: Int?) -> String? {
+        level.map { ["N", "M", "H", "C"][clampLevel($0)] }
+    }
+
+    private func thermalText(_ level: Int?) -> String? {
+        guard let level else { return nil }
+        return [
+            locale.localized("Nominal"),
+            locale.localized("Moderate"),
+            locale.localized("Heavy"),
+            locale.localized("Critical"),
+        ][clampLevel(level)]
+    }
+
+    private func rssiText(_ rssi: Int?) -> String? {
+        rssi.map(String.init)
     }
 }
 
@@ -309,29 +322,35 @@ struct SectionHeader: View {
 /// Derived values for one chart series, computed once per body evaluation
 /// and shared by `PageHero` and `MetricChart` so the two cards cannot drift.
 struct ChartMetrics {
-    let values: [Double]
+    let values: [Double?]
     let effectiveMax: Double
-    let normPoints: [Double]
-    let avg: Double
-    let peak: Double
+    let normPoints: [Double?]
+    let avg: Double?
+    let peak: Double?
+    let latest: Double?
+    let hasData: Bool
 
-    init(values: [Double], maxY: Double?) {
+    init(values: [Double?], maxY: Double?) {
         self.values = values
-        let peak = values.max() ?? 0
-        self.peak = peak
+        let present = values.compactMap { $0 }
+        peak = present.max()
+        latest = values.last ?? nil
         if let maxY {
             effectiveMax = max(maxY, 0.001)
         } else {
-            effectiveMax = max(peak * 1.08, 0.001)
+            effectiveMax = max((peak ?? 0) * 1.08, 0.001)
         }
         let maxValue = effectiveMax
-        normPoints = values.map { min(1.0, max(0, $0 / maxValue)) }
-        avg = values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+        normPoints = values.map { value in
+            value.map { min(1.0, max(0, $0 / maxValue)) }
+        }
+        avg = present.isEmpty ? nil : present.reduce(0, +) / Double(present.count)
+        hasData = !present.isEmpty
     }
 
     var latestColor: Color {
-        guard let last = values.last else { return .secondary }
-        return ColorScale.color(for: min(1.0, max(0, last / effectiveMax)))
+        guard let latest else { return .secondary }
+        return ColorScale.color(for: min(1.0, max(0, latest / effectiveMax)))
     }
 }
 
@@ -344,7 +363,7 @@ struct PageHero: View {
     let icon: String
     let title: String
     let unit: String
-    let values: [Double]
+    let values: [Double?]
     var maxY: Double? = nil
     var format: (Double) -> String = { String(format: "%.1f", $0) }
     var latestText: String? = nil
@@ -365,7 +384,7 @@ struct PageHero: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(latestText ?? (values.last.map(format) ?? "\u{2014}"))
+                Text(latestText ?? (m.latest.map(format) ?? "\u{2014}"))
                     .font(.system(size: 40, weight: .semibold, design: .rounded))
                     .foregroundStyle(m.latestColor)
                     .monospacedDigit()
@@ -377,7 +396,7 @@ struct PageHero: View {
                 }
             }
 
-            if m.normPoints.count > 1 {
+            if m.hasData && m.normPoints.count > 1 {
                 Sparkline(values: m.normPoints, color: m.latestColor, height: 84)
             } else {
                 Color.clear.frame(height: 84)
@@ -397,8 +416,8 @@ struct PageHero: View {
 
     private func stats(_ m: ChartMetrics) -> some View {
         HStack(spacing: 0) {
-            Text("AVG \(format(m.avg))")
-            Text("  \u{00B7}  MAX \(format(m.peak))")
+            Text("AVG \(m.avg.map(format) ?? "\u{2014}")")
+            Text("  \u{00B7}  MAX \(m.peak.map(format) ?? "\u{2014}")")
         }
         .font(.caption.monospacedDigit())
         .foregroundStyle(.tertiary)
@@ -415,7 +434,7 @@ struct MetricChart: View {
     let title: String
     let icon: String?
     let unit: String
-    let values: [Double]
+    let values: [Double?]
     var maxY: Double? = nil
     var format: (Double) -> String = { String(format: "%.1f", $0) }
     var latestText: String? = nil
@@ -425,8 +444,8 @@ struct MetricChart: View {
     var body: some View {
         let m = ChartMetrics(values: values, maxY: maxY)
         VStack(alignment: .leading, spacing: compact ? 6 : 10) {
-            header(color: m.latestColor)
-            if m.normPoints.count > 1 {
+            header(m)
+            if m.hasData && m.normPoints.count > 1 {
                 Sparkline(
                     values: m.normPoints,
                     color: m.latestColor,
@@ -448,7 +467,7 @@ struct MetricChart: View {
         )
     }
 
-    private func header(color: Color) -> some View {
+    private func header(_ m: ChartMetrics) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if let icon {
                 Image(systemName: icon)
@@ -460,20 +479,15 @@ struct MetricChart: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            if let latestText {
-                Text(latestText)
+            if let text = latestText ?? m.latest.map(format) {
+                Text(text)
                     .font(compact ? .caption.monospaced().weight(.semibold) : .callout.monospaced().weight(.semibold))
-                    .foregroundStyle(color)
+                    .foregroundStyle(m.latestColor)
                     .lineLimit(1)
-            } else if let last = values.last {
-                Text(format(last))
-                    .font(
-                        compact
-                            ? .system(.subheadline, design: .rounded).weight(.semibold)
-                            : .system(.title3, design: .rounded).weight(.semibold)
-                    )
-                    .foregroundStyle(color)
-                    .monospacedDigit()
+            } else {
+                Text("\u{2014}")
+                    .font(compact ? .caption.monospaced().weight(.semibold) : .callout.monospaced().weight(.semibold))
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             if !unit.isEmpty {
@@ -486,8 +500,8 @@ struct MetricChart: View {
 
     private func stats(_ m: ChartMetrics) -> some View {
         HStack(spacing: 0) {
-            Text("AVG \(format(m.avg))")
-            Text("  \u{00B7}  MAX \(format(m.peak))")
+            Text("AVG \(m.avg.map(format) ?? "\u{2014}")")
+            Text("  \u{00B7}  MAX \(m.peak.map(format) ?? "\u{2014}")")
         }
         .font(.caption2)
         .foregroundStyle(.tertiary)
@@ -501,7 +515,7 @@ struct MetricChart: View {
 /// fill. Replaces Swift Charts: no display-list machinery, no per-mark
 /// tracking areas, so per-tick redraws cost a fraction of a Chart's.
 private struct Sparkline: View {
-    let values: [Double]
+    let values: [Double?]
     let color: Color
     let height: CGFloat
     var lineWidth: CGFloat = 2
@@ -510,61 +524,72 @@ private struct Sparkline: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            let line = Self.linePath(Self.points(values: values, width: w, height: h))
+            let segments = Self.segments(values: values, width: w, height: h)
             ZStack {
-                Self.areaPath(area: line, width: w, height: h).fill(
-                    LinearGradient(
-                        colors: [color.opacity(0.28), color.opacity(0.02)],
-                        startPoint: .top,
-                        endPoint: .bottom
+                ForEach(segments.indices, id: \.self) { index in
+                    let points = segments[index]
+                    let line = Self.linePath(points)
+                    Self.areaPath(line: line, points: points, height: h)
+                        .fill(gradient)
+                    line.stroke(
+                        color,
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                     )
-                )
-                line.stroke(
-                    color,
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
-                )
+                }
             }
         }
         .frame(height: height)
     }
 
-    private static func areaPath(area line: Path, width: CGFloat, height: CGFloat) -> Path {
+    private var gradient: LinearGradient {
+        LinearGradient(
+            colors: [color.opacity(0.28), color.opacity(0.02)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
+    /// Groups consecutive available points into drawable segments. A missing
+    /// value (sensor unavailable) breaks the line instead of drawing through a
+    /// fabricated zero.
+    private static func segments(values: [Double?], width: CGFloat, height: CGFloat) -> [[CGPoint]] {
+        guard values.count > 1, width > 0, height > 0 else { return [] }
+        let stepX = width / CGFloat(values.count - 1)
+        var result: [[CGPoint]] = []
+        var current: [CGPoint] = []
+        for (idx, value) in values.enumerated() {
+            guard let value else {
+                if current.count > 1 { result.append(current) }
+                current.removeAll(keepingCapacity: true)
+                continue
+            }
+            current.append(
+                CGPoint(
+                    x: CGFloat(idx) * stepX,
+                    y: height - CGFloat(max(0, min(1, value))) * height
+                )
+            )
+        }
+        if current.count > 1 { result.append(current) }
+        return result
+    }
+
+    private static func areaPath(line: Path, points: [CGPoint], height: CGFloat) -> Path {
         var area = line
-        area.addLine(to: CGPoint(x: width, y: height))
-        area.addLine(to: CGPoint(x: 0, y: height))
+        guard let first = points.first, let last = points.last else { return area }
+        area.addLine(to: CGPoint(x: last.x, y: height))
+        area.addLine(to: CGPoint(x: first.x, y: height))
         area.closeSubpath()
         return area
     }
 
-    private static func points(values: [Double], width: CGFloat, height: CGFloat) -> [CGPoint] {
-        guard values.count > 1, width > 0, height > 0 else { return [] }
-        let stepX = width / CGFloat(values.count - 1)
-        return values.enumerated().map { idx, v in
-            CGPoint(
-                x: CGFloat(idx) * stepX,
-                y: height - CGFloat(max(0, min(1, v))) * height
-            )
-        }
-    }
-
-    /// Smooth curve through the points: quadratic beziers via midpoints,
-    /// approximating the monotone interpolation the chart previously used.
     private static func linePath(_ pts: [CGPoint]) -> Path {
         var path = Path()
         guard let first = pts.first else { return path }
         path.move(to: first)
-        guard pts.count > 2 else {
-            if pts.count == 2 { path.addLine(to: pts[1]) }
-            return path
+        for point in pts.dropFirst() {
+            path.addLine(to: point)
         }
-        for i in 1..<(pts.count - 1) {
-            let mid = CGPoint(
-                x: (pts[i].x + pts[i + 1].x) / 2,
-                y: (pts[i].y + pts[i + 1].y) / 2
-            )
-            path.addQuadCurve(to: mid, control: pts[i])
-        }
-        path.addLine(to: pts[pts.count - 1])
         return path
     }
 }
