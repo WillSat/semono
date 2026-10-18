@@ -2,6 +2,10 @@
 
 Pixel-art performance HUD overlay for macOS.
 
+<p align="center">
+  <img src="docs/images/semono-hero.png" alt="Semono HUD, Settings and Device Information" width="100%">
+</p>
+
 ## Layout
 
 ```
