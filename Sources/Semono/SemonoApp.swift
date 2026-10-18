@@ -1,14 +1,22 @@
 import AppKit
 import SwiftUI
 
-/// Routes the settings-window request from the AppKit menu bar into the
-/// SwiftUI scene system.
+/// Routes window requests from the AppKit menu bar into the SwiftUI scene
+/// system.
 @MainActor
 enum WindowRouter {
     static var openSettings: (() -> Void)?
+    static var openDeviceInfo: (() -> Void)?
 
     static func register(openWindow: OpenWindowAction) {
-        openSettings = { openWindow(id: "settings") }
+        openSettings = {
+            openWindow(id: "settings")
+            WindowFronting.bringToFront(.settings)
+        }
+        openDeviceInfo = {
+            openWindow(id: "device-info")
+            WindowFronting.bringToFront(.deviceInfo)
+        }
     }
 }
 
@@ -29,9 +37,17 @@ struct SemonoApp: App {
 
         Window("Semono Settings", id: "settings") {
             SettingsView()
-                .frame(minWidth: 560, minHeight: 400)
         }
-        .defaultSize(width: 660, height: 460)
+        .defaultSize(width: 900, height: 640)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.suppressed)
+
+        Window("Device Information", id: "device-info") {
+            DeviceInfoView()
+        }
+        .defaultSize(width: 1080, height: 720)
         .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .restorationBehavior(.disabled)

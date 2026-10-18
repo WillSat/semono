@@ -4,21 +4,17 @@ import AppKit
 /// subviews) means no tracking areas or cursor rects live in the menu bar
 /// region, and updates only invalidate the layer instead of re-snapshotting
 /// AppKit text views every tick.
+///
+/// Text mode draws the tiny metric label above the value, as before. Icon mode
+/// draws the monochrome Semono mark and nothing else; network mode uses the
+/// same two-line frame for connection state plus up/down speed.
 final class MenubarContentView: NSView {
-    var displayText: String = "" {
+    var readout: StatusBarReadout = StatusBarReadout() {
         didSet {
-            if displayText != oldValue {
-                needsDisplay = true
-                rebuildCachedStrings()
-            }
-        }
-    }
-    var displayType: String = "CPU" {
-        didSet {
-            if displayType != oldValue {
-                needsDisplay = true
-                rebuildCachedStrings()
-            }
+            guard readout != oldValue else { return }
+            needsDisplay = true
+            rebuildCachedStrings()
+            updateAccessibility()
         }
     }
 
@@ -28,10 +24,12 @@ final class MenubarContentView: NSView {
     // containing nil and aborted the process — so the CTFont objects are
     // never realized at layout time.
     private static let valueFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-    private static let typeFont = NSFont.systemFont(ofSize: 6.5, weight: .medium)
+    private static let typeFont = NSFont.systemFont(ofSize: 7, weight: .medium)
 
     /// Horizontal padding around the widest measured string.
     private static let widthPadding: CGFloat = 10
+    /// Status bar length for the icon-only mode.
+    private static let iconWidth: CGFloat = 28
 
     // Text uses the system label color, resolved against the effective
     // appearance so it follows the macOS light/dark menu bar automatically.
@@ -39,42 +37,63 @@ final class MenubarContentView: NSView {
     // handed to CoreText unresolved; color never enters the measurement
     // path, and the draw path gets the appearance-correct value.
     private var textColor: NSColor
+    private var valueColor: NSColor
 
-    // Strings are built and measured only when the text, type, or effective
+    // Strings are built and measured only when the readout or the effective
     // appearance changes, so the per-tick draw path allocates nothing.
-    private var cachedValueString: NSAttributedString?
-    private var cachedTypeString: NSAttributedString?
-    private var cachedValueSize: NSSize = .zero
-    private var cachedTypeSize: NSSize = .zero
+    private var cachedTopString: NSAttributedString?
+    private var cachedBottomString: NSAttributedString?
+    private var cachedTopSize: NSSize = .zero
+    private var cachedBottomSize: NSSize = .zero
 
     override init(frame frameRect: NSRect) {
         textColor = Self.resolvedLabelColor(for: NSApp.effectiveAppearance)
+        valueColor = textColor
         super.init(frame: frameRect)
+        wantsLayer = true
         rebuildCachedStrings()
+        updateAccessibility()
     }
 
     required init?(coder: NSCoder) {
         textColor = Self.resolvedLabelColor(for: NSApp.effectiveAppearance)
+        valueColor = textColor
         super.init(coder: coder)
+        wantsLayer = true
         rebuildCachedStrings()
+        updateAccessibility()
     }
 
     private func rebuildCachedStrings() {
-        cachedValueString = NSAttributedString(
-            string: displayText,
-            attributes: [.font: Self.valueFont, .foregroundColor: textColor]
+        guard !readout.isIcon else {
+            cachedTopString = nil
+            cachedBottomString = nil
+            cachedTopSize = .zero
+            cachedBottomSize = .zero
+            return
+        }
+
+        valueColor = Self.color(
+            forPressureLevel: readout.pressureLevel,
+            label: textColor,
+            appearance: effectiveAppearance
         )
-        cachedTypeString = NSAttributedString(
-            string: displayType,
+        cachedTopString = NSAttributedString(
+            string: readout.top,
             attributes: [.font: Self.typeFont, .foregroundColor: textColor]
         )
-        cachedValueSize = cachedValueString?.size() ?? .zero
-        cachedTypeSize = cachedTypeString?.size() ?? .zero
+        cachedBottomString = NSAttributedString(
+            string: readout.bottom,
+            attributes: [.font: Self.valueFont, .foregroundColor: valueColor]
+        )
+        cachedTopSize = cachedTopString?.size() ?? .zero
+        cachedBottomSize = cachedBottomString?.size() ?? .zero
     }
 
     /// Width required by the currently displayed content.
     var fittingWidth: CGFloat {
-        ceil(max(cachedValueSize.width, cachedTypeSize.width)) + Self.widthPadding
+        if readout.isIcon { return Self.iconWidth }
+        return ceil(max(cachedTopSize.width, cachedBottomSize.width)) + Self.widthPadding
     }
 
     override var intrinsicContentSize: NSSize {
@@ -85,20 +104,35 @@ final class MenubarContentView: NSView {
         super.viewDidChangeEffectiveAppearance()
         textColor = Self.resolvedLabelColor(for: effectiveAppearance)
         rebuildCachedStrings()
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        guard let value = cachedValueString, let type = cachedTypeString else { return }
+        if readout.isIcon {
+            let side = min(bounds.height - 2, 20)
+            let rect = NSRect(
+                x: bounds.midX - side / 2,
+                y: bounds.midY - side / 2,
+                width: side,
+                height: side
+            )
+            SemonoMark.draw(in: rect, color: textColor)
+            return
+        }
 
-        let maxWidth = max(cachedValueSize.width, cachedTypeSize.width)
+        guard let top = cachedTopString, let bottom = cachedBottomString else { return }
+
+        let maxWidth = max(cachedTopSize.width, cachedBottomSize.width)
         let x = (bounds.width - maxWidth) / 2
-        let totalHeight = cachedValueSize.height + cachedTypeSize.height - 1
+        let totalHeight = cachedBottomSize.height + cachedTopSize.height - 1
         let y = (bounds.height - totalHeight) / 2
 
-        type.draw(at: NSPoint(x: x, y: y))
-        value.draw(at: NSPoint(x: x, y: y + cachedTypeSize.height - 1))
+        // AppKit's y axis is bottom-up here: draw the value on the lower line
+        // first, then the tiny type label above it.
+        bottom.draw(at: NSPoint(x: x, y: y))
+        top.draw(at: NSPoint(x: x, y: y + cachedBottomSize.height - 1))
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -107,6 +141,11 @@ final class MenubarContentView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         showMenu()
+    }
+
+    private func updateAccessibility() {
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(readout.accessibility)
     }
 
     /// Pops the menu up below the item. The status bar window uses a flipped
@@ -125,6 +164,30 @@ final class MenubarContentView: NSView {
         var resolved = NSColor.labelColor
         appearance.performAsCurrentDrawingAppearance {
             let color = NSColor.labelColor
+            resolved = color.usingColorSpace(.deviceRGB) ?? color
+        }
+        return resolved
+    }
+
+    /// Warnings are the one place the menu bar readout uses colour, matching
+    /// the HUD's pressure semantics without turning every metric into a tinted
+    /// item. Normal pressure and all other metrics use the menu bar label
+    /// colour, so the item keeps following light/dark menu bars.
+    private static func color(
+        forPressureLevel level: Int?,
+        label: NSColor,
+        appearance: NSAppearance
+    ) -> NSColor {
+        switch level {
+        case 1: resolved(.systemOrange, for: appearance)
+        case 2: resolved(.systemRed, for: appearance)
+        default: label
+        }
+    }
+
+    private static func resolved(_ color: NSColor, for appearance: NSAppearance) -> NSColor {
+        var resolved = color
+        appearance.performAsCurrentDrawingAppearance {
             resolved = color.usingColorSpace(.deviceRGB) ?? color
         }
         return resolved

@@ -12,19 +12,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var menubarView: MenubarContentView?
     let metrics = MetricsCollector()
-    private var saveFrameTimer: Timer?
+    private var saveSizeTimer: Timer?
+    private var reanchorTimer: Timer?
+    /// Guards the resize -> re-anchor -> resize cycle while SwiftUI lays the
+    /// HUD out for a new set of columns or font scale.
+    private var isRepositioning = false
     private var cancellables = Set<AnyCancellable>()
     private var wakeObservers: [NSObjectProtocol] = []
+    /// Checkable "Show HUD" item, kept in sync with the persisted setting.
+    private var hudMenuItem: NSMenuItem?
+    private var infoMenuItem: NSMenuItem?
+    private var settingsMenuItem: NSMenuItem?
+    private var quitMenuItem: NSMenuItem?
+    /// The menu bar can disappear while the process keeps running (full-screen
+    /// Spaces). A light visibility probe is what lets sampling stop then, and
+    /// start again when the bar is revealed.
+    private var statusBarVisibilityTimer: Timer?
+    private var lastStatusBarVisible: Bool?
+    /// Snapshots used to wake the sampling loop only when a setting that
+    /// actually changes demand was written.
+    private var lastDemand: SamplingDemand?
+    private var lastShowHUD: Bool?
+    private var lastHUDCorner: String?
+    private var lastHUDHorizontalMargin: Double?
+    private var lastHUDVerticalMargin: Double?
 
-    /// Debounce for persisting the HUD frame after drag/resize ends.
-    private static let frameSaveDebounce: TimeInterval = 0.5
-    /// Delay before the first frame save so the initial auto-size settles.
+    /// Debounce for persisting the HUD size after auto-resize ends.
+    private static let sizeSaveDebounce: TimeInterval = 0.5
+    /// Delay before the first size save/re-anchor so the initial auto-size
+    /// settles.
     private static let initialFrameSaveDelay: TimeInterval = 0.1
     /// Minimum status bar item width so the readout stays comfortably clickable.
     private static let statusBarMinWidth: CGFloat = 28
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        #if DEBUG
+        // Screenshot/behaviour hooks for development builds only.
+        if let raw = ProcessInfo.processInfo.environment["SEMONO_STATUS_BAR_METRIC"],
+           StatusBarMetric(rawValue: raw) != nil {
+            SettingsStore.shared.statusBarMetric = raw
+        }
+        if let raw = ProcessInfo.processInfo.environment["SEMONO_SHOW_HUD"] {
+            SettingsStore.shared.showHUD = raw != "0"
+        }
+        #endif
+
         pruneLegacyDefaults()
         registerFont()
         setupStatusBar()
@@ -33,8 +67,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startSpaceObservation()
         showHUD()
         metrics.start()
+        startStatusBarVisibilityMonitoring()
         startWakeObservation()
         syncLoginItemState()
+        lastDemand = SamplingDemand.current()
+        lastShowHUD = SettingsStore.shared.showHUD
+        lastHUDCorner = SettingsStore.shared.hudCorner
+        lastHUDHorizontalMargin = SettingsStore.shared.hudMarginHorizontal
+        lastHUDVerticalMargin = SettingsStore.shared.hudMarginVertical
         observeMetrics()
         observeSettings()
 
@@ -46,8 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         #if DEBUG
-        // Screenshot-automation hook: opens settings, then quits. Debug builds
-        // only, so it can never leak into a shipped bundle.
+        // Screenshot-automation hooks. Debug builds only, so they can never
+        // leak into a shipped bundle.
         if CommandLine.arguments.contains("--open-windows") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 NSApp.activate()
@@ -57,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
             }
         }
+        if CommandLine.arguments.contains("--open-device-info") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSApp.activate()
+                WindowRouter.openDeviceInfo?()
+            }
+        }
         #endif
     }
 
@@ -64,6 +110,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         metrics.stop()
         stopSpaceObservation()
         stopWakeObservation()
+        saveSizeTimer?.invalidate()
+        saveSizeTimer = nil
+        reanchorTimer?.invalidate()
+        reanchorTimer = nil
+        statusBarVisibilityTimer?.invalidate()
+        statusBarVisibilityTimer = nil
     }
 
     @objc private func screenParamsChanged() {
@@ -78,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pruneLegacyDefaults() {
         let legacyKeys = [
             "adaptiveSleep", "sleepSensitivity", "sleepHysteresis", "sleepInterval",
-            "hideInFullscreen", "hudPosition",
+            "hideInFullscreen", "hudPosition", "hudX", "hudY", "hudHasSavedPosition",
         ]
         for key in legacyKeys {
             UserDefaults.standard.removeObject(forKey: key)
@@ -103,6 +155,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         .merge(with: metrics.$memoryUsage.map { _ in })
         .merge(with: metrics.$powerUsage.map { _ in })
+        .merge(with: metrics.$memoryPressureLevel.map { _ in })
+        .merge(with: metrics.$downloadSpeed.map { _ in })
+        .merge(with: metrics.$uploadSpeed.map { _ in })
+        .merge(with: metrics.$networkType.map { _ in })
+        .merge(with: metrics.$wifiRSSI.map { _ in })
         .merge(with: NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).map { _ in })
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.updateStatusBarTitle() }
@@ -158,7 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// touched when the value actually differs, so this costs a comparison.
     private func refreshOverlay() {
         syncOverlayMembership()
-        updateOverlayState()
+        applyHUDFrameIfChanged()
+        updateOverlayState(refreshStatusBarVisibility: true)
     }
 
     private func stopSpaceObservation() {
@@ -195,8 +253,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func observeSettings() {
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncOverlayMembership() }
+            .sink { [weak self] _ in self?.settingsDidChange() }
             .store(in: &cancellables)
+    }
+
+    /// The one path through which a defaults write reaches the live window,
+    /// the status item and the sampling loop.
+    private func settingsDidChange() {
+        refreshMenuTitles()
+
+        let demand = SamplingDemand.current()
+        let showHUD = SettingsStore.shared.showHUD
+        let showChanged = showHUD != lastShowHUD
+        if demand != lastDemand || showChanged {
+            lastDemand = demand
+            lastShowHUD = showHUD
+            // A metric or column change must take effect now, not after the
+            // current refresh interval. The loop re-reads demand before the
+            // next sample and parks itself if nothing is visible.
+            metrics.wake()
+        }
+
+        syncOverlayMembership()
+        applyHUDFrameIfChanged()
+        updateOverlayState()
+        if showChanged, showHUD {
+            // Bringing the HUD back also re-applies the chosen corner, even
+            // if the user had dragged it somewhere else earlier.
+            reposition()
+        }
+        updateStatusBarTitle()
+    }
+
+    /// Repositions the HUD when a corner or margin setting changes (including
+    /// a reset or a write from another process), without reacting to unrelated
+    /// defaults writes such as a font or opacity slider.
+    private func applyHUDFrameIfChanged() {
+        let store = SettingsStore.shared
+        let changed = store.hudCorner != lastHUDCorner
+            || store.hudMarginHorizontal != lastHUDHorizontalMargin
+            || store.hudMarginVertical != lastHUDVerticalMargin
+        guard changed else { return }
+        lastHUDCorner = store.hudCorner
+        lastHUDHorizontalMargin = store.hudMarginHorizontal
+        lastHUDVerticalMargin = store.hudMarginVertical
+        reposition()
     }
 
     /// Installs the setting on the live window. A collection-behaviour change
@@ -217,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         w.orderOut(nil)
         w.collectionBehavior = OverlaySpacePolicy.collectionBehavior(showInFullscreen: show)
-        if show || w.isOnActiveSpace {
+        if SettingsStore.shared.showHUD, show || w.isOnActiveSpace {
             w.orderFrontRegardless()
         }
 
@@ -232,24 +333,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateOverlayState()
     }
 
-    /// Reads whether the HUD is on screen right now and puts sampling to sleep
-    /// with it. The window server owns the answer: the HUD is displayed exactly
-    /// while the Space the user is looking at contains it — with the overlay
-    /// switched off that is every desktop Space and no full-screen Space.
+    /// Reads which surfaces are actually on screen right now and puts sampling
+    /// to sleep with the ones that are not.
     ///
-    /// Nothing is sampled while the HUD is hidden, since the columns have no
-    /// reader then; the menu bar readout is the one exception, because it is on
-    /// screen over every desktop whether the HUD is or not.
-    private func updateOverlayState() {
+    /// Two independent switches matter: the manual "Show HUD" setting combined
+    /// with the window server's Space membership decides whether the HUD is
+    /// displayed, and the status item's real visibility decides whether the
+    /// menu bar readout is. Nothing visible means no sensor is read at all.
+    private func updateOverlayState(refreshStatusBarVisibility: Bool = false) {
         guard let w = window else { return }
-        // A swap that leaves the HUD ordered out although it belongs on the
-        // active Space would keep it hidden until the next Space change; order
-        // it back in. (With the overlay off inside a full-screen Space the
-        // window does not belong there, so this stays quiet.)
-        if !w.isVisible, w.isOnActiveSpace {
-            w.orderFrontRegardless()
+
+        let showHUD = SettingsStore.shared.showHUD
+        if showHUD {
+            // A swap that leaves the HUD ordered out although it belongs on the
+            // active Space would keep it hidden until the next Space change;
+            // order it back in. (With the overlay off inside a full-screen Space
+            // the window does not belong there, so this stays quiet.)
+            if !w.isVisible, w.isOnActiveSpace {
+                w.orderFrontRegardless()
+            }
+        } else if w.isVisible {
+            w.orderOut(nil)
         }
-        metrics.setScope(OverlaySpacePolicy.isDisplayed(w) ? .full : .statusBarOnly)
+
+        let hudVisible = showHUD && OverlaySpacePolicy.isDisplayed(w)
+        // The status item's visibility is only re-probed on Space changes and
+        // by the light monitor; routine settings writes reuse the last answer so
+        // a slider drag never pays for a window-server query per frame.
+        if refreshStatusBarVisibility || lastStatusBarVisible == nil {
+            lastStatusBarVisible = isStatusBarVisible()
+        }
+        let statusBarVisible = lastStatusBarVisible ?? true
+
+        metrics.setScope(
+            SamplingScope.resolve(hudVisible: hudVisible, statusBarVisible: statusBarVisible)
+        )
     }
 
     // MARK: - HUD Window
@@ -296,65 +414,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.contentView = hosting
 
         let delegate = WindowDelegate(
-            onMove: { [weak self, weak w] in self?.scheduleSaveFrame(w) },
-            onResize: { [weak self, weak w] in self?.scheduleSaveFrame(w) }
+            onResize: { [weak self, weak w] in
+                self?.scheduleSizeSave(w)
+                self?.reposition()
+                self?.scheduleReanchor()
+            }
         )
         hudWindowDelegate = delegate
         w.delegate = delegate
 
         // orderFrontRegardless rather than makeKeyAndOrderFront: a borderless
         // window never becomes key, and showing the HUD over a full-screen app
-        // must not pull focus away from it.
-        w.orderFrontRegardless()
+        // must not pull focus away from it. A launch with the HUD switched off
+        // creates the window without showing it.
+        if SettingsStore.shared.showHUD {
+            w.orderFrontRegardless()
+        }
         window = w
-        updateOverlayState()
+        updateOverlayState(refreshStatusBarVisibility: true)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.initialFrameSaveDelay) { [weak self, weak w] in
-            self?.scheduleSaveFrame(w)
+            self?.saveSize(w)
+            self?.reposition()
         }
     }
 
+    /// Snaps the HUD back to the selected corner of the screen it is on. A
+    /// drag remains a session adjustment; the persisted setting is the source
+    /// of truth for launch, corner changes and content-driven resizes.
     private func reposition() {
-        guard let w = window else { return }
+        guard let w = window, !isRepositioning else { return }
         let screen = w.screen ?? preferredScreen
         guard let screen else { return }
-        w.setFrame(hudFrame(for: screen), display: true, animate: false)
+        // Use the live window size, not the debounced saved size: a
+        // right-anchored HUD must keep its right edge fixed while SwiftUI
+        // grows it for new columns or a larger font.
+        let target = hudFrame(for: screen, size: w.frame.size)
+        guard w.frame != target else { return }
+        isRepositioning = true
+        w.setFrame(target, display: true, animate: false)
+        isRepositioning = false
     }
 
-    private func scheduleSaveFrame(_ w: NSWindow?) {
-        saveFrameTimer?.invalidate()
-        saveFrameTimer = Timer.scheduledTimer(withTimeInterval: Self.frameSaveDebounce, repeats: false) { [weak self, weak w] _ in
-            guard let self, let w else { return }
-            Task { @MainActor in self.saveFrame(w) }
+    /// Re-anchors after SwiftUI changes the window's content size. Debounced
+    /// so a layout pass does not repeatedly move the window.
+    private func scheduleReanchor() {
+        reanchorTimer?.invalidate()
+        reanchorTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.reposition() }
         }
     }
 
-    private func saveFrame(_ w: NSWindow?) {
-        guard let w else { return }
-        let f = w.frame
-        SettingsStore.shared.hudX = f.origin.x
-        SettingsStore.shared.hudY = f.origin.y
-        SettingsStore.shared.hudWidth = f.size.width
-        SettingsStore.shared.hudHeight = f.size.height
-        SettingsStore.shared.hudHasSavedPosition = true
+    private func scheduleSizeSave(_ w: NSWindow?) {
+        saveSizeTimer?.invalidate()
+        saveSizeTimer = Timer.scheduledTimer(withTimeInterval: Self.sizeSaveDebounce, repeats: false) { [weak self, weak w] _ in
+            guard let self, let w else { return }
+            Task { @MainActor in self.saveSize(w) }
+        }
     }
 
-    /// Restores the saved frame as-is (no position clamping — the HUD may be
-    /// tucked anywhere), or the default corner on first launch or when the
-    /// saved frame's screen is gone.
+    private func saveSize(_ w: NSWindow?) {
+        guard let w else { return }
+        let size = w.frame.size
+        SettingsStore.shared.hudWidth = size.width
+        SettingsStore.shared.hudHeight = size.height
+    }
+
+    /// The corner is the persisted position; the saved size is only a hint for
+    /// the first layout, then the window auto-sizes to its SwiftUI content.
     private func hudFrame(for screen: NSScreen) -> NSRect {
         let store = SettingsStore.shared
-        let defaults = SettingsStore.Defaults.self
-        let hasSaved = store.hudHasSavedPosition
-            || (store.hudX != defaults.hudX && store.hudY != defaults.hudY)
-        guard hasSaved, store.hudWidth > 0, store.hudHeight > 0 else {
-            return HUDFrame.defaultFrame(for: screen)
+        let size: CGSize
+        if store.hudWidth > 0, store.hudHeight > 0 {
+            size = CGSize(width: store.hudWidth, height: store.hudHeight)
+        } else {
+            size = HUDFrame.defaultSize
         }
-        let frame = NSRect(x: store.hudX, y: store.hudY, width: store.hudWidth, height: store.hudHeight)
-        guard NSScreen.screens.contains(where: { $0.frame.intersects(frame) }) else {
-            return HUDFrame.defaultFrame(for: screen)
-        }
-        return frame
+        return hudFrame(for: screen, size: size)
+    }
+
+    private func hudFrame(for screen: NSScreen, size: CGSize) -> NSRect {
+        let store = SettingsStore.shared
+        let position = HUDPosition(rawValue: store.hudCorner) ?? .bottomLeft
+        return position.frame(
+            for: size,
+            screenFrame: screen.frame,
+            topEdge: screen.visibleFrame.maxY,
+            horizontalMargin: CGFloat(store.hudMarginHorizontal),
+            verticalMargin: CGFloat(store.hudMarginVertical)
+        )
     }
 
     // MARK: - Status Bar
@@ -365,6 +513,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = MenubarContentView()
 
         let menu = NSMenu()
+
+        let hudItem = NSMenuItem(
+            title: LocaleManager.shared.localized("Show HUD"),
+            action: #selector(toggleHUD),
+            keyEquivalent: ""
+        )
+        hudItem.target = self
+        hudItem.state = SettingsStore.shared.showHUD ? .on : .off
+        hudItem.image = NSImage(
+            systemSymbolName: SettingsStore.shared.showHUD ? "eye" : "eye.slash",
+            accessibilityDescription: LocaleManager.shared.localized("Show HUD")
+        )
+        menu.addItem(hudItem)
+        hudMenuItem = hudItem
+
+        menu.addItem(NSMenuItem.separator())
+
+        let infoItem = NSMenuItem(
+            title: LocaleManager.shared.localized("Device Information..."),
+            action: #selector(openDeviceInfo),
+            keyEquivalent: "i"
+        )
+        infoItem.target = self
+        infoItem.image = NSImage(
+            systemSymbolName: "desktopcomputer",
+            accessibilityDescription: LocaleManager.shared.localized("Device Information")
+        )
+        menu.addItem(infoItem)
+        infoMenuItem = infoItem
+
+        menu.addItem(NSMenuItem.separator())
+
         let settingsItem = NSMenuItem(
             title: LocaleManager.shared.localized("Settings..."),
             action: #selector(openSettings),
@@ -372,6 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         settingsItem.target = self
         menu.addItem(settingsItem)
+        settingsMenuItem = settingsItem
 
         menu.addItem(NSMenuItem.separator())
 
@@ -382,28 +563,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         quitItem.target = self
         menu.addItem(quitItem)
+        quitMenuItem = quitItem
         view.menu = menu
 
-        statusItem?.view = view
+        // Configure the readout before the view is inserted: icon-only mode is
+        // paused, so there may be no later metric change to make the menu bar
+        // take a fresh snapshot of the view.
         menubarView = view
+        updateStatusBarTitle()
+        statusItem?.view = view
+
+        // Icon-only mode is paused, so an update of the readout never comes.
+        // A couple of late invalidations let the item settle into the menu bar
+        // before the system takes its snapshot.
+        for delay in [0.3, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak view] in
+                view?.needsDisplay = true
+            }
+        }
     }
 
     private func updateStatusBarTitle() {
         let metric = StatusBarMetric(rawValue: SettingsStore.shared.statusBarMetric) ?? .cpu
-        let text = metric.text(from: metrics)
-        let type = metric.label
-        guard let view = menubarView,
-              text != view.displayText || type != view.displayType
-        else { return }
-        view.displayText = text
-        view.displayType = type
+        let readout = metric.readout(from: metrics)
+        guard let view = menubarView, view.readout != readout else { return }
+        view.readout = readout
         let width = max(Self.statusBarMinWidth, view.fittingWidth)
         if statusItem?.length != width {
             statusItem?.length = width
         }
+        // The view's setter already invalidates; this also covers the launch
+        // path (readout unchanged) and the delayed icon snapshot.
+        view.needsDisplay = true
+    }
+
+    /// AppKit menu titles are not SwiftUI-localized, so a language change is
+    /// reflected the next time the menu opens.
+    private func refreshMenuTitles() {
+        let locale = LocaleManager.shared
+        hudMenuItem?.title = locale.localized("Show HUD")
+        infoMenuItem?.title = locale.localized("Device Information...")
+        settingsMenuItem?.title = locale.localized("Settings...")
+        quitMenuItem?.title = locale.localized("Quit Semono")
+        refreshHUDMenuState()
+    }
+
+    /// Keeps the checkmark and the eye glyph in step with the persisted
+    /// setting, including writes made by another process.
+    private func refreshHUDMenuState() {
+        let desired: NSControl.StateValue = SettingsStore.shared.showHUD ? .on : .off
+        guard let item = hudMenuItem, item.state != desired else { return }
+        item.state = desired
+        item.image = NSImage(
+            systemSymbolName: desired == .on ? "eye" : "eye.slash",
+            accessibilityDescription: LocaleManager.shared.localized("Show HUD")
+        )
+    }
+
+    /// True while the status item can actually be seen. NSStatusItem.isVisible
+    /// does not account for a full-screen Space hiding the menu bar, so the
+    /// item window's visibility/occlusion state and the window server's menu
+    /// bar window are consulted as well.
+    private func isStatusBarVisible() -> Bool {
+        guard let item = statusItem else { return false }
+        let window = item.view?.window
+        return StatusBarVisibility.isVisible(
+            itemVisible: item.isVisible,
+            windowExists: window != nil,
+            windowVisible: window?.isVisible ?? true,
+            windowOcclusionVisible: window?.occlusionState.contains(.visible) ?? true,
+            menuBarOnScreen: MenuBarProbe.isOnScreen()
+        )
+    }
+
+    /// The menu bar can be hidden and revealed without a Space change, so a
+    /// light probe keeps the sampling scope honest while the HUD is out of the
+    /// way. It reads metadata only; no metric is sampled here.
+    private func startStatusBarVisibilityMonitoring() {
+        statusBarVisibilityTimer?.invalidate()
+        lastStatusBarVisible = isStatusBarVisible()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let visible = self.isStatusBarVisible()
+                guard visible != self.lastStatusBarVisible else { return }
+                self.updateOverlayState(refreshStatusBarVisibility: true)
+            }
+        }
+        timer.tolerance = 0.25
+        statusBarVisibilityTimer = timer
+    }
+
+    // MARK: - HUD Toggle
+
+    @objc private func toggleHUD() {
+        SettingsStore.shared.showHUD.toggle()
+        refreshHUDMenuState()
+        updateOverlayState()
+        if SettingsStore.shared.showHUD {
+            reposition()
+        }
+        metrics.wake()
     }
 
     // MARK: - Window Opening
+
+    @objc private func openDeviceInfo() {
+        NSApp.activate()
+        WindowRouter.openDeviceInfo?()
+    }
 
     @objc private func openSettings() {
         NSApp.activate()
@@ -435,17 +703,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Window Delegate
 
 private final class WindowDelegate: NSObject, NSWindowDelegate {
-    let onMove: (() -> Void)?
     let onResize: (() -> Void)?
 
-    init(
-        onMove: (() -> Void)? = nil,
-        onResize: (() -> Void)? = nil
-    ) {
-        self.onMove = onMove
+    init(onResize: (() -> Void)? = nil) {
         self.onResize = onResize
     }
 
-    func windowDidMove(_ notification: Notification) { onMove?() }
     func windowDidResize(_ notification: Notification) { onResize?() }
 }

@@ -40,6 +40,9 @@ final class MetricsCollector: ObservableObject {
     /// tick to re-resolve the primary service before reading counters.
     private var networkRefreshNextTick = false
     private let pathMonitor = NWPathMonitor()
+    /// True while nothing visible asks for data; the loop then waits for a
+    /// demand change instead of waking on the refresh interval.
+    private var idle = false
 
     /// Runs one sampling loop for the lifetime of the app. The scope is read
     /// afresh every tick, so the loop is never torn down and rebuilt when the
@@ -82,7 +85,24 @@ final class MetricsCollector: ObservableObject {
                 lastScope = scope
                 lastDemand = demand
 
-                let sample = await sampler.sampleOnce(flags: .forTick(scope: scope, demand: demand))
+                let flags = Sampler.Flags.forTick(scope: scope, demand: demand)
+                if flags.isEmpty {
+                    // Nothing on screen consumes a metric: no sensor is read,
+                    // no helper is queried, and the loop parks until a
+                    // visibility or settings change wakes it. Clearing the
+                    // published values means a later wake starts from dashes
+                    // instead of showing a stale reading while it resamples.
+                    if !self.idle {
+                        sampler.resetRateBaselines()
+                        self.apply(Sampler.Sample())
+                        self.idle = true
+                    }
+                    await self.waitForDemandChange()
+                    continue
+                }
+                self.idle = false
+
+                let sample = await sampler.sampleOnce(flags: flags)
                 self.apply(sample)
                 await self.waitForNextTick()
             }
@@ -98,11 +118,17 @@ final class MetricsCollector: ObservableObject {
         StatsHelper.shared.shutdown()
     }
 
-    /// Puts the loop to sleep or wakes it. Driven purely by whether the HUD is
-    /// on screen; a no-op while the scope is unchanged.
+    /// Puts the loop to sleep or wakes it. Driven purely by what the user can
+    /// see: the HUD, the menu bar icon, or neither.
     func setScope(_ scope: SamplingScope) {
         guard scope != self.scope else { return }
         self.scope = scope
+        tickSleep?.cancel()
+    }
+
+    /// Re-evaluates demand immediately after a settings write instead of
+    /// waiting for the next tick. Does not sample by itself.
+    func wake() {
         tickSleep?.cancel()
     }
 
@@ -136,6 +162,21 @@ final class MetricsCollector: ObservableObject {
         tickSleep = nil
     }
 
+    /// Parks the loop while no visible surface asks for a metric. A one-hour
+    /// sleep is just a parking spot: any scope or demand change cancels it.
+    private func waitForDemandChange() async {
+        let wait = Task {
+            do {
+                try await Task.sleep(for: .seconds(3600))
+            } catch {
+                // Cancelled because a visible surface (or a setting) changed.
+            }
+        }
+        tickSleep = wait
+        await wait.value
+        tickSleep = nil
+    }
+
     /// Publishes a sample. @Published fires only on actual value changes so
     /// the HUD does not re-render when the metrics are static.
     private func apply(_ s: Sampler.Sample) {
@@ -160,14 +201,37 @@ final class MetricsCollector: ObservableObject {
 
 /// What the sampling loop is allowed to read.
 ///
-/// The menu bar readout is on screen in every Space — including the full-screen
-/// Spaces the overlay itself is excluded from — so its metric is sampled in
-/// both scopes. HUD columns are only worth reading while the HUD is on screen.
+/// This is the intersection of the two visible surfaces: the HUD columns are
+/// only worth reading while the HUD is displayed, and the menu bar metric only
+/// while the status item itself is on screen. When neither is visible the
+/// scope is `.none` and the loop parks without reading a single sensor.
 enum SamplingScope: Equatable {
-    /// HUD on screen: columns and the menu bar metric.
+    /// HUD and menu bar are both on screen.
     case full
-    /// HUD not on screen: the menu bar metric alone.
+    /// HUD is visible, but the menu bar (and with it the status item) is not.
+    case hudOnly
+    /// HUD is hidden, but the menu bar is visible.
     case statusBarOnly
+    /// Neither surface is visible: no sampling at all.
+    case none
+
+    var showsHUD: Bool {
+        self == .full || self == .hudOnly
+    }
+
+    var showsStatusBar: Bool {
+        self == .full || self == .statusBarOnly
+    }
+
+    /// The user-visible surfaces are the inputs; the scope is the result.
+    static func resolve(hudVisible: Bool, statusBarVisible: Bool) -> SamplingScope {
+        switch (hudVisible, statusBarVisible) {
+        case (true, true): .full
+        case (true, false): .hudOnly
+        case (false, true): .statusBarOnly
+        case (false, false): .none
+        }
+    }
 }
 
 /// What the UI currently asks to see, independent of whether the HUD is asleep.
@@ -198,7 +262,7 @@ struct SamplingDemand: Equatable {
 /// walks, CoreWLAN, helper subprocesses, mach/sysctl calls) runs on the
 /// cooperative pool; the main actor only receives the finished `Sample`.
 struct Sampler: Sendable {
-    struct Flags: Sendable {
+    struct Flags: Sendable, Equatable {
         var collectGPU: Bool
         var collectCPU: Bool
         var collectMemory: Bool
@@ -207,18 +271,27 @@ struct Sampler: Sendable {
         var collectNetwork: Bool
         var collectThermal: Bool
 
-        /// One tick's work. Sleeping (`statusBarOnly`) reads exactly the metric
-        /// the menu bar shows and nothing else.
+        var isEmpty: Bool {
+            !collectGPU && !collectCPU && !collectMemory && !collectPower
+                && !collectStorage && !collectNetwork && !collectThermal
+        }
+
+        /// One tick's work. Every flag is justified by something actually on
+        /// screen: HUD columns only while the HUD is displayed, and exactly the
+        /// status bar metric while the status item is visible. A hidden menu
+        /// bar contributes nothing, even if its metric is configured.
         static func forTick(scope: SamplingScope, demand: SamplingDemand) -> Flags {
-            let columns = scope == .full
-            let bar = demand.statusBarMetric
+            let columns = scope.showsHUD
+            let bar: StatusBarMetric = scope.showsStatusBar ? demand.statusBarMetric : .icon
             return Flags(
                 collectGPU: (columns && demand.computeColumn) || bar == .gpu,
                 collectCPU: (columns && demand.computeColumn) || bar == .cpu,
-                collectMemory: (columns && demand.memoryColumn) || bar == .memory,
+                collectMemory: (columns && demand.memoryColumn)
+                    || bar == .memory
+                    || bar == .pressure,
                 collectPower: (columns && demand.computeColumn) || bar == .pwr,
                 collectStorage: columns && demand.storageColumn,
-                collectNetwork: columns && demand.networkColumn,
+                collectNetwork: (columns && demand.networkColumn) || bar == .network,
                 collectThermal: columns && demand.storageColumn
             )
         }

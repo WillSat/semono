@@ -41,18 +41,33 @@ Four configurable columns:
 - CPU / GPU / memory / power / disk / network — 1 / 2 / 3 / 5 s refresh
 - Wi‑Fi RSSI via CoreWLAN; Ethernet / offline detection — 64-bit byte counters
   track the primary service's interface
-- Transparent floating window, draggable anywhere (including tucking under
-  the Dock), position remembered across restarts
-- Menu bar icon with live metric readout, Settings and Quit
+- Transparent floating window, draggable during a session, with a four-corner
+  position setting (top-left / top-right / bottom-left / bottom-right; default
+  bottom-left), independent horizontal and vertical margins (default 0), and
+  right-edge anchoring for the right corners. Bottom corners use the whole
+  display, on either side of the Dock; the chosen position is re-applied on
+  launch, margin changes and content resizes.
+- Menu bar icon with a live readout (CPU / GPU / power / memory / memory
+  pressure / network status with up/down speed / icon only), a Show HUD switch,
+  Device Information, Settings and Quit
+- Device Information window: a sidebar of curated `system_profiler` data types
+  (hardware, displays, storage, network, software, security, …) with a hardware
+  summary, human-readable grouped fields, search, lazy per-category loading and
+  collapsible long lists (applications, fonts, extensions, frameworks)
 - Optional overlay in full-screen apps: macOS gives every full-screen app a
   Space of its own, and this setting decides whether the HUD joins them (on =
   visible on every desktop, the full-screen ones included; off = ordinary
   desktops only)
-- Sampling sleeps with the HUD: while the HUD is off screen only the menu bar
-  metric is still read. With “Show in fullscreen” on (the default) the HUD is
-  visible over full-screen apps too, so the sleep path mainly matters when the
-  HUD is excluded from a full-screen Space.
-- Chinese / English UI language switch
+- UI-driven sampling: what is on screen decides what is read. With the HUD
+  hidden only the menu bar metric is sampled; with the menu bar showing only
+  the Semono mark, or with the menu bar itself hidden by a full-screen Space,
+  a hidden HUD stops sampling entirely. A hidden status item does not stop the
+  HUD columns, and a hidden HUD never reads another column.
+- UI languages, in picker order: Emoji 🎉 (an Easter egg whose interface text
+  contains no English), Simplified Chinese, Traditional Chinese, English,
+  Japanese, Korean and Spanish. The default follows the system's primary
+  language (including the Traditional/Simplified Chinese script) and falls
+  back to English when unsupported.
 - Single resident stats helper process serves all GPU / power / disk reads —
   no per-tick subprocess spawning, so the HUD measures the system, not itself
 
@@ -62,14 +77,18 @@ Four configurable columns:
 |---------|---------|---------|
 | Refresh interval | 1 / 2 / 3 / 5 s | 3 s |
 | Background opacity | 0 – 100 % | 60 % |
+| Show HUD | on / off (menu bar or settings) | on |
+| HUD position | top-left / top-right / bottom-left / bottom-right | bottom-left |
+| HUD horizontal margin | 0 – 40 pt | 0 pt |
+| HUD vertical margin | 0 – 40 pt | 0 pt |
 | Show in fullscreen | on / off | on |
 | Block display | on / off | off |
 | Font | system monospaced fonts | Departure Mono |
 | Font scale | −5 … +10 | 0 |
 | Columns | Compute / Memory / Storage / Network | all on |
-| Menu bar metric | CPU / GPU / PWR / MEM | CPU |
+| Menu bar metric | CPU / GPU / PWR / MEM / PRS / NET / icon only | CPU |
 | Launch at login | on / off | off |
-| Language | English / 中文 | system |
+| Language | Emoji 🎉 / 简体中文 / 繁體中文 / English / 日本語 / 한국어 / Español | system, then English |
 
 ## Build
 
