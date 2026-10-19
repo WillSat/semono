@@ -5,7 +5,7 @@ import Combine
 import os
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var window: NSWindow?
     private var hudWindowDelegate: WindowDelegate?
@@ -22,7 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Checkable "Show HUD" item, kept in sync with the persisted setting.
     private var hudMenuItem: NSMenuItem?
     private var infoMenuItem: NSMenuItem?
+    private var guideMenuItem: NSMenuItem?
+    private var updateMenuItem: NSMenuItem?
     private var settingsMenuItem: NSMenuItem?
+    private var aboutMenuItem: NSMenuItem?
     private var quitMenuItem: NSMenuItem?
     /// The menu bar can disappear while the process keeps running (full-screen
     /// Spaces). A light visibility probe is what lets sampling stop then, and
@@ -44,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let initialFrameSaveDelay: TimeInterval = 0.1
     /// Minimum status bar item width so the readout stays comfortably clickable.
     private static let statusBarMinWidth: CGFloat = 28
+    private static let firstRunGuideKey = "hasShownFirstRunGuide"
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -75,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastHUDCorner = SettingsStore.shared.hudCorner
         lastHUDHorizontalMargin = SettingsStore.shared.hudMarginHorizontal
         lastHUDVerticalMargin = SettingsStore.shared.hudMarginVertical
+        showFirstRunGuideIfNeeded()
         observeMetrics()
         observeSettings()
 
@@ -101,6 +106,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 NSApp.activate()
                 WindowRouter.openDeviceInfo?()
+            }
+        }
+        if CommandLine.arguments.contains("--open-guide") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSApp.activate()
+                WindowRouter.openGuide?()
+            }
+        }
+        if CommandLine.arguments.contains("--open-about") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSApp.activate()
+                WindowRouter.openAbout?()
+            }
+        }
+
+        if CommandLine.arguments.contains("--open-menu") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                guard let view = self.menubarView, let menu = view.menu else { return }
+                NSApp.activate()
+                menu.popUp(
+                    positioning: nil,
+                    at: NSPoint(x: 0, y: view.bounds.height + 5),
+                    in: view
+                )
             }
         }
         #endif
@@ -130,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pruneLegacyDefaults() {
         let legacyKeys = [
             "adaptiveSleep", "sleepSensitivity", "sleepHysteresis", "sleepInterval",
-            "hideInFullscreen", "hudPosition", "hudX", "hudY", "hudHasSavedPosition",
+            "hideInFullscreen",
         ]
         for key in legacyKeys {
             UserDefaults.standard.removeObject(forKey: key)
@@ -175,9 +204,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// server. All this class does is install the membership and then observe
     /// its consequence: whether the HUD is on the Space the user is looking at.
     private var spaceObservers: [NSObjectProtocol] = []
-    /// The setting last installed on the window, so the many unrelated defaults
-    /// writes (the four the HUD saves on every drag, for one) can never re-order
-    /// a window the user is dragging.
+    /// The setting last installed on the window, so unrelated defaults writes
+    /// (window size saves, slider changes, …) cannot re-order the overlay.
     private var appliedShowInFullscreen: Bool?
     /// Re-reads the state once a membership swap has settled.
     private var membershipSettle: Task<Void, Never>?
@@ -261,6 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the status item and the sampling loop.
     private func settingsDidChange() {
         refreshMenuTitles()
+        UpdateChecker.shared.settingsChanged()
 
         let demand = SamplingDemand.current()
         let showHUD = SettingsStore.shared.showHUD
@@ -278,8 +307,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyHUDFrameIfChanged()
         updateOverlayState()
         if showChanged, showHUD {
-            // Bringing the HUD back also re-applies the chosen corner, even
-            // if the user had dragged it somewhere else earlier.
             reposition()
         }
         updateStatusBarTitle()
@@ -406,7 +433,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showInFullscreen: SettingsStore.shared.showInFullscreen
         )
         appliedShowInFullscreen = SettingsStore.shared.showInFullscreen
-        w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
 
         let hosting = NSHostingView(rootView: HUDView(metrics: metrics))
@@ -439,9 +465,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Snaps the HUD back to the selected corner of the screen it is on. A
-    /// drag remains a session adjustment; the persisted setting is the source
-    /// of truth for launch, corner changes and content-driven resizes.
+    /// Snaps the HUD to the selected corner of the screen it is on. The
+    /// persisted setting is the single source of truth for launch, corner
+    /// changes and content-driven resizes.
     private func reposition() {
         guard let w = window, !isRepositioning else { return }
         let screen = w.screen ?? preferredScreen
@@ -513,6 +539,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = MenubarContentView()
 
         let menu = NSMenu()
+        // The update item is enabled/disabled explicitly; auto-validation can
+        // otherwise disable programmatic actions whose targets are the
+        // AppDelegate.
+        menu.autoenablesItems = false
+        menu.delegate = self
+        menu.appearance = NSApp.effectiveAppearance
 
         let hudItem = NSMenuItem(
             title: LocaleManager.shared.localized("Show HUD"),
@@ -543,7 +575,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(infoItem)
         infoMenuItem = infoItem
 
+        let guideItem = NSMenuItem(
+            title: LocaleManager.shared.localized("User Guide"),
+            action: #selector(openGuide),
+            keyEquivalent: ""
+        )
+        guideItem.target = self
+        guideItem.image = NSImage(
+            systemSymbolName: "book",
+            accessibilityDescription: LocaleManager.shared.localized("User Guide")
+        )
+        menu.addItem(guideItem)
+        guideMenuItem = guideItem
+
         menu.addItem(NSMenuItem.separator())
+
+        let updateItem = NSMenuItem(
+            title: LocaleManager.shared.localized("Check for Updates…"),
+            action: #selector(performUpdateAction),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        updateItem.image = NSImage(
+            systemSymbolName: "arrow.triangle.2.circlepath",
+            accessibilityDescription: LocaleManager.shared.localized("Check for Updates…")
+        )
+        menu.addItem(updateItem)
+        updateMenuItem = updateItem
 
         let settingsItem = NSMenuItem(
             title: LocaleManager.shared.localized("Settings..."),
@@ -553,6 +611,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
         settingsMenuItem = settingsItem
+
+        let aboutItem = NSMenuItem(
+            title: LocaleManager.shared.localized("About Semono"),
+            action: #selector(openAbout),
+            keyEquivalent: ""
+        )
+        aboutItem.target = self
+        aboutItem.image = NSImage(
+            systemSymbolName: "info.circle",
+            accessibilityDescription: LocaleManager.shared.localized("About Semono")
+        )
+        menu.addItem(aboutItem)
+        aboutMenuItem = aboutItem
 
         menu.addItem(NSMenuItem.separator())
 
@@ -572,6 +643,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menubarView = view
         updateStatusBarTitle()
         statusItem?.view = view
+        observeUpdateChecker()
+        UpdateChecker.shared.start()
 
         // Icon-only mode is paused, so an update of the readout never comes.
         // A couple of late invalidations let the item settle into the menu bar
@@ -586,8 +659,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusBarTitle() {
         let metric = StatusBarMetric(rawValue: SettingsStore.shared.statusBarMetric) ?? .cpu
         let readout = metric.readout(from: metrics)
-        guard let view = menubarView, view.readout != readout else { return }
-        view.readout = readout
+        guard let view = menubarView else { return }
+        if view.readout != readout {
+            view.readout = readout
+        }
+        guard !view.isChecking else { return }
         let width = max(Self.statusBarMinWidth, view.fittingWidth)
         if statusItem?.length != width {
             statusItem?.length = width
@@ -597,15 +673,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.needsDisplay = true
     }
 
+    private func showFirstRunGuideIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.firstRunGuideKey) else { return }
+        defaults.set(true, forKey: Self.firstRunGuideKey)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            NSApp.activate()
+            WindowRouter.openGuide?()
+        }
+    }
+
+    private func observeUpdateChecker() {
+        let checker = UpdateChecker.shared
+        updateCheckerStateChanged(checker.state)
+        checker.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state in self?.updateCheckerStateChanged(state) }
+            .store(in: &cancellables)
+    }
+
+    private func updateCheckerStateChanged(_ state: UpdateChecker.State) {
+        let checking = UpdateChecker.shared.isChecking
+        menubarView?.isChecking = checking
+        if checking {
+            statusItem?.length = 24
+        } else {
+            updateStatusBarTitle()
+        }
+        refreshUpdateMenuState()
+    }
+
+    private func refreshUpdateMenuState() {
+        guard let item = updateMenuItem else { return }
+        let locale = LocaleManager.shared
+        let checker = UpdateChecker.shared
+        if checker.isChecking {
+            item.title = locale.localized("Checking for Updates…")
+            item.isEnabled = false
+            item.action = nil
+        } else if checker.hasUpdate {
+            item.title = locale.localized("Go to Update")
+            item.isEnabled = true
+            item.action = #selector(performUpdateAction)
+        } else {
+            item.title = locale.localized("Check for Updates…")
+            item.isEnabled = true
+            item.action = #selector(performUpdateAction)
+        }
+        item.image = NSImage(
+            systemSymbolName: checker.hasUpdate ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath",
+            accessibilityDescription: item.title
+        )
+    }
+
     /// AppKit menu titles are not SwiftUI-localized, so a language change is
     /// reflected the next time the menu opens.
     private func refreshMenuTitles() {
         let locale = LocaleManager.shared
         hudMenuItem?.title = locale.localized("Show HUD")
         infoMenuItem?.title = locale.localized("Device Information...")
+        guideMenuItem?.title = locale.localized("User Guide")
         settingsMenuItem?.title = locale.localized("Settings...")
+        aboutMenuItem?.title = locale.localized("About Semono")
         quitMenuItem?.title = locale.localized("Quit Semono")
         refreshHUDMenuState()
+        refreshUpdateMenuState()
     }
 
     /// Keeps the checkmark and the eye glyph in step with the persisted
@@ -677,6 +809,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         syncLoginItemState()
         WindowRouter.openSettings?()
+    }
+
+    @objc private func openGuide() {
+        NSApp.activate()
+        WindowRouter.openGuide?()
+    }
+
+    @objc private func openAbout() {
+        NSApp.activate()
+        WindowRouter.openAbout?()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        // The status menu otherwise inherits the menu bar's vibrant appearance,
+        // which can be dark even when the app windows and system menus are
+        // light. Follow the app's effective appearance instead.
+        menu.appearance = NSApp.effectiveAppearance
+        // Refresh the update entry at the last moment so a check that finished
+        // while the menu was closed is reflected immediately.
+        refreshUpdateMenuState()
+    }
+
+    @objc private func performUpdateAction() {
+        if UpdateChecker.shared.hasUpdate {
+            UpdateChecker.shared.openRelease()
+        } else {
+            UpdateChecker.shared.checkForUpdates(manual: true)
+        }
     }
 
     @objc private func quitApp() {

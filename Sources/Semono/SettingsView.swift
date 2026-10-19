@@ -63,7 +63,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .appearance: "Background, display style and typography."
         case .columns: "Choose which metrics the HUD shows."
         case .menuBar: "What the menu bar icon readout shows."
-        case .general: "Startup, language and reset."
+        case .general: "Startup, language, updates and reset."
         }
     }
 
@@ -84,6 +84,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 struct SettingsView: View {
     @ObservedObject var settings = SettingsStore.shared
     @ObservedObject var locale = LocaleManager.shared
+    @ObservedObject private var updates = UpdateChecker.shared
     @State private var selection: SettingsSection? = SettingsView.initialSection
     @State private var showLoginError = false
     @State private var loginErrorMessage = ""
@@ -163,18 +164,6 @@ struct SettingsView: View {
                 }
             }
             .listStyle(.sidebar)
-
-            Divider()
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle")
-                Text(t("Settings apply immediately"))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
         }
     }
 
@@ -217,10 +206,30 @@ struct SettingsView: View {
                         ForEach(SettingsStore.refreshOptions, id: \.self) { seconds in
                             Text("\(seconds)\(locale.localized("s"))").tag(seconds)
                         }
+                        Text(t("More…")).tag(SettingsStore.customRefreshTag)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
+                }
+
+                if settings.refreshInterval == SettingsStore.customRefreshTag {
+                    SettingsRow(
+                        title: t("Custom Interval"),
+                        description: t("0.10–100.00 seconds, two decimal places.")
+                    ) {
+                        customRefreshControl
+                    }
+                }
+
+                if settings.effectiveRefreshInterval < 1.0 {
+                    Label(
+                        t("Intervals below 1.00 s increase power consumption."),
+                        systemImage: "bolt.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -307,12 +316,62 @@ struct SettingsView: View {
         .buttonStyle(.plain)
     }
 
+    private var customRefreshBinding: Binding<Double> {
+        Binding(
+            get: { SettingsStore.clampedRefreshSeconds(settings.refreshCustomSeconds) },
+            set: { settings.refreshCustomSeconds = SettingsStore.clampedRefreshSeconds($0) }
+        )
+    }
+
+    private var customRefreshControl: some View {
+        HStack(spacing: 8) {
+            TextField(
+                "",
+                value: customRefreshBinding,
+                format: .number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.trailing)
+            .font(.system(.callout, design: .monospaced))
+            .frame(width: 84)
+            .accessibilityLabel(Text(t("Custom Interval")))
+
+            Text(t("s"))
+                .foregroundStyle(.secondary)
+
+            Stepper(
+                "",
+                value: customRefreshBinding,
+                in: SettingsStore.refreshSecondsRange,
+                step: 0.10
+            )
+            .labelsHidden()
+            .accessibilityLabel(Text(t("Custom Interval")))
+        }
+    }
+
     private var appearancePage: some View {
         VStack(alignment: .leading, spacing: 16) {
+            SettingsCard(title: t("Style"), icon: "circle.lefthalf.filled") {
+                SettingsRow(
+                    title: t("Theme"),
+                    description: t("Dark HUD, or a white background with dark text.")
+                ) {
+                    Picker("", selection: $settings.hudTheme) {
+                        ForEach(HUDTheme.allCases) { theme in
+                            Text(t(theme.titleKey)).tag(theme.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+
             SettingsCard(title: t("Background"), icon: "rectangle.inset.filled") {
                 SettingsRow(
-                    title: t("Opacity"),
-                    description: t("Transparency of the HUD background.")
+                    title: t("Background Opacity"),
+                    description: t("Opacity of the HUD background.")
                 ) {
                     HStack(spacing: 10) {
                         Slider(value: $settings.backgroundOpacity, in: 0.0...1.0, step: 0.05)
@@ -499,6 +558,36 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .fixedSize()
+                }
+            }
+
+            SettingsCard(title: t("Updates"), icon: "arrow.triangle.2.circlepath") {
+                SettingsToggleRow(
+                    title: t("Automatically Check for Updates"),
+                    description: t("Check for updates once a day. Failures retry once after 10 minutes."),
+                    isOn: $settings.autoUpdateCheck
+                )
+                SettingsRow(
+                    title: t("Check Now"),
+                    description: t("Check GitHub for a newer version.")
+                ) {
+                    Button {
+                        if updates.hasUpdate {
+                            updates.openRelease()
+                        } else {
+                            updates.checkForUpdates(manual: true)
+                        }
+                    } label: {
+                        Label(
+                            updates.hasUpdate
+                                ? t("Go to Update")
+                                : updates.isChecking
+                                    ? t("Checking for Updates…")
+                                    : t("Check for Updates…"),
+                            systemImage: "arrow.triangle.2.circlepath"
+                        )
+                    }
+                    .disabled(updates.isChecking)
                 }
             }
 

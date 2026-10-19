@@ -29,33 +29,55 @@ final class SettingsStore: ObservableObject {
     /// Single source for default values. The `@AppStorage` declarations and
     /// `resetToDefaults` both reference these, so the two lists cannot drift.
     enum Defaults {
-        static let refreshInterval = 3
-        static let launchAtLogin = false
-        static let backgroundOpacity = 0.6
+        static let refreshInterval = 4
+        static let refreshCustomSeconds: Double = 1.0
+        static let launchAtLogin = true
+        static let backgroundOpacity = 0.9
+        static let hudTheme = HUDTheme.light.rawValue
         static let hudWidth: Double = -1
         static let hudHeight: Double = -1
-        static let hudCorner = HUDPosition.bottomLeft.rawValue
+        static let hudCorner = HUDPosition.bottomRight.rawValue
         static let hudMarginHorizontal: Double = 0
         static let hudMarginVertical: Double = 0
         static let showHUD = true
-        static let showInFullscreen = true
+        static let showInFullscreen = false
         static let fontName = "DepartureMono-Regular"
         static let fontScale: Double = 0
-        static let statusBarMetric = StatusBarMetric.cpu.rawValue
+        static let statusBarMetric = StatusBarMetric.memory.rawValue
         static let showComputeColumn = true
         static let showMemoryColumn = true
-        static let showStorageColumn = true
+        static let showStorageColumn = false
         static let showNetworkColumn = true
         static let useBlockDisplay = false
+        static let autoUpdateCheck = true
         static let appLanguage = LocaleManager.detectSystemLanguage()
     }
 
-    /// Refresh tiers offered by the pickers.
-    static let refreshOptions = [1, 2, 3, 5]
+    /// Refresh tiers offered by the picker, followed by "More…" (tag 0).
+    nonisolated static let refreshOptions = [1, 2, 3, 4, 5, 10]
+    nonisolated static let customRefreshTag = 0
+    nonisolated static let refreshSecondsRange: ClosedRange<Double> = 0.10...100.00
+
+    /// Rounds to two decimals and keeps the custom interval inside the
+    /// supported range. Used by the field and by the sampling loop.
+    nonisolated static func clampedRefreshSeconds(_ value: Double) -> Double {
+        guard value.isFinite else { return Defaults.refreshCustomSeconds }
+        let clamped = min(max(value, refreshSecondsRange.lowerBound), refreshSecondsRange.upperBound)
+        return (clamped * 100).rounded() / 100
+    }
+
+    var effectiveRefreshInterval: TimeInterval {
+        guard refreshInterval == Self.customRefreshTag else {
+            return TimeInterval(refreshInterval)
+        }
+        return Self.clampedRefreshSeconds(refreshCustomSeconds)
+    }
 
     @AppStorage("refreshInterval") var refreshInterval = Defaults.refreshInterval
+    @AppStorage("refreshCustomSeconds") var refreshCustomSeconds = Defaults.refreshCustomSeconds
     @AppStorage("launchAtLogin") var launchAtLogin = Defaults.launchAtLogin
     @AppStorage("backgroundOpacity") var backgroundOpacity = Defaults.backgroundOpacity
+    @AppStorage("hudTheme") var hudTheme = Defaults.hudTheme
     @AppStorage("hudWidth") var hudWidth = Defaults.hudWidth
     @AppStorage("hudHeight") var hudHeight = Defaults.hudHeight
     @AppStorage("hudCorner") var hudCorner = Defaults.hudCorner
@@ -71,6 +93,7 @@ final class SettingsStore: ObservableObject {
     @AppStorage("showStorageColumn") var showStorageColumn = Defaults.showStorageColumn
     @AppStorage("showNetworkColumn") var showNetworkColumn = Defaults.showNetworkColumn
     @AppStorage("useBlockDisplay") var useBlockDisplay = Defaults.useBlockDisplay
+    @AppStorage("autoUpdateCheck") var autoUpdateCheck = Defaults.autoUpdateCheck
     @AppStorage("appLanguage") var appLanguage = Defaults.appLanguage
 
     /// Fixed-pitch fonts available for the HUD. Starts with the bundled
@@ -117,12 +140,16 @@ final class SettingsStore: ObservableObject {
     }
 
     func resetToDefaults() {
-        if launchAtLogin {
+        if Defaults.launchAtLogin {
+            try? SMAppService.mainApp.register()
+        } else if launchAtLogin {
             try? SMAppService.mainApp.unregister()
         }
         refreshInterval = Defaults.refreshInterval
+        refreshCustomSeconds = Defaults.refreshCustomSeconds
         launchAtLogin = Defaults.launchAtLogin
         backgroundOpacity = Defaults.backgroundOpacity
+        hudTheme = Defaults.hudTheme
         hudWidth = Defaults.hudWidth
         hudHeight = Defaults.hudHeight
         hudCorner = Defaults.hudCorner
@@ -138,6 +165,7 @@ final class SettingsStore: ObservableObject {
         showStorageColumn = Defaults.showStorageColumn
         showNetworkColumn = Defaults.showNetworkColumn
         useBlockDisplay = Defaults.useBlockDisplay
+        autoUpdateCheck = Defaults.autoUpdateCheck
         appLanguage = Defaults.appLanguage
     }
 }

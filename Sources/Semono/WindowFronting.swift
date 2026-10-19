@@ -4,6 +4,8 @@ import SwiftUI
 enum SemonoWindow {
     case settings
     case deviceInfo
+    case guide
+    case about
 }
 
 /// Weak references to the SwiftUI scene windows. The NSViewRepresentable below
@@ -13,9 +15,13 @@ enum SemonoWindow {
 enum WindowRegistry {
     static weak var settings: NSWindow?
     static weak var deviceInfo: NSWindow?
+    static weak var guide: NSWindow?
+    static weak var about: NSWindow?
 
     static var settingsWindow: NSWindow? { settings }
     static var deviceInfoWindow: NSWindow? { deviceInfo }
+    static var guideWindow: NSWindow? { guide }
+    static var aboutWindow: NSWindow? { about }
 }
 
 struct WindowRegistration: NSViewRepresentable {
@@ -36,6 +42,8 @@ struct WindowRegistration: NSViewRepresentable {
             switch window {
             case .settings: WindowRegistry.settings = view.window
             case .deviceInfo: WindowRegistry.deviceInfo = view.window
+            case .guide: WindowRegistry.guide = view.window
+            case .about: WindowRegistry.about = view.window
             }
         }
     }
@@ -68,6 +76,8 @@ enum WindowFronting {
         switch window {
         case .settings: registered = WindowRegistry.settingsWindow
         case .deviceInfo: registered = WindowRegistry.deviceInfoWindow
+        case .guide: registered = WindowRegistry.guideWindow
+        case .about: registered = WindowRegistry.aboutWindow
         }
         let target = registered ?? NSApp.windows.first { candidate in
             titles(for: window).contains(candidate.title)
@@ -84,6 +94,10 @@ enum WindowFronting {
         switch window {
         case .settings: ["Semono Settings", "Semono 设置"]
         case .deviceInfo: ["Device Information", "设备信息"]
+        case .guide:
+            [LocaleManager.shared.localized("User Guide"), "User Guide", "使用说明"]
+        case .about:
+            [LocaleManager.shared.localized("About Semono"), "About Semono", "关于 Semono"]
         }
     }
 }

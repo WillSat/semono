@@ -91,18 +91,6 @@ struct DeviceInfoView: View {
                 }
             }
             .listStyle(.sidebar)
-
-            Divider()
-            HStack(spacing: 6) {
-                Image(systemName: "terminal")
-                Text(t("Data from system_profiler"))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
         }
     }
 }
@@ -384,7 +372,7 @@ private struct SummaryCard: View {
     let watermark: String
 
     var body: some View {
-        ZStack(alignment: .trailing) {
+        ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(
                     LinearGradient(
@@ -393,12 +381,6 @@ private struct SummaryCard: View {
                         endPoint: .bottomTrailing
                     )
                 )
-
-            Image(systemName: watermark)
-                .font(.system(size: 132, weight: .thin))
-                .foregroundStyle(.white.opacity(0.09))
-                .padding(.trailing, 34)
-                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -439,6 +421,18 @@ private struct SummaryCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .trailing) {
+            // Keep the watermark out of layout: SF Symbols have different
+            // intrinsic heights (laptop vs gearshape), which otherwise makes
+            // the Software summary card taller than the Hardware card.
+            Image(systemName: watermark)
+                .font(.system(size: 132, weight: .thin))
+                .foregroundStyle(.white.opacity(0.09))
+                .padding(.trailing, 34)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(.white.opacity(0.10))

@@ -45,8 +45,7 @@ only real hardware and Spaces can exercise.
 - Set horizontal and vertical margins independently (0 by default) and confirm
   the HUD moves by exactly that many points from the anchored edges.
 - Change columns or font scale; the auto-sized HUD must stay anchored in the
-  chosen corner. A manual drag is a session adjustment and is discarded on
-  relaunch or when the HUD is hidden and shown again.
+  chosen corner.
 - Multi-display: the corner is the area of the display the HUD is on.
 
 ## Refresh gating

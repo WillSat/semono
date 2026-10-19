@@ -9,7 +9,7 @@ struct HUDPositionTests {
     private let size = CGSize(width: 140, height: 24)
 
     @Test func defaultCornerAndMargins() {
-        #expect(HUDPosition(rawValue: SettingsStore.Defaults.hudCorner) == .bottomLeft)
+        #expect(HUDPosition(rawValue: SettingsStore.Defaults.hudCorner) == .bottomRight)
         #expect(SettingsStore.Defaults.hudMarginHorizontal == 0)
         #expect(SettingsStore.Defaults.hudMarginVertical == 0)
     }

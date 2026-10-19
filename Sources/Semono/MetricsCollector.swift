@@ -143,7 +143,7 @@ final class MetricsCollector: ObservableObject {
     /// HUD coming back on screen is repainted immediately instead of showing
     /// what it last saw until the next scheduled tick.
     private func waitForNextTick() async {
-        let interval = Double(SettingsStore.shared.refreshInterval)
+        let interval = SettingsStore.shared.effectiveRefreshInterval
         // Tolerance lets the kernel coalesce this wakeup with other system
         // timers instead of the process waking alone on every tick; the HUD
         // needs no tick-level precision.

@@ -3,7 +3,8 @@
 A lightweight menu bar app with a floating pixel-art HUD for macOS.
 
 <p align="center">
-  <img src="docs/images/semono-hero.png" alt="Semono HUD, Settings and Device Information" width="100%">
+  <img src="docs/images/semono-hero.png" alt="Semono HUD, Settings and Device Information" width="49%">
+  <img src="docs/images/semono-promo-en.png" alt="Semono feature overview" width="49%">
 </p>
 
 ## Features
@@ -20,6 +21,14 @@ A lightweight menu bar app with a floating pixel-art HUD for macOS.
 Emoji 🎉 · 简体中文 · 繁體中文 · English · 日本語 · 한국어 · Español
 
 The default matches the system language and falls back to English when unsupported.
+
+## Install
+
+The release is ad-hoc signed (no Developer ID). After moving Semono.app to Applications, clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Semono.app
+```
 
 ## Build
 

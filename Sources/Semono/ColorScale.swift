@@ -12,15 +12,27 @@ enum ColorScale {
         (1.0,  NSColor(hex: 0xEF5350).usingColorSpace(.sRGB) ?? NSColor(hex: 0xEF5350)),
     ]
 
-    /// Precomputed 0–100% palette, built once from the anchors. Lookup is a
-    /// single array index — no interpolation or NSColor bridging at render time.
-    static let palette: [Color] = (0...100).map { interpolate(Double($0) / 100.0) }
+    /// Darker anchors for a white HUD background, preserving the same
+    /// blue → green → yellow → orange → red progression.
+    private static let lightAnchors: [(Double, NSColor)] = [
+        (0.0,  NSColor(hex: 0x1E88E5).usingColorSpace(.sRGB) ?? NSColor(hex: 0x1E88E5)),
+        (0.25, NSColor(hex: 0x388E3C).usingColorSpace(.sRGB) ?? NSColor(hex: 0x388E3C)),
+        (0.5,  NSColor(hex: 0xB8860B).usingColorSpace(.sRGB) ?? NSColor(hex: 0xB8860B)),
+        (0.75, NSColor(hex: 0xE65100).usingColorSpace(.sRGB) ?? NSColor(hex: 0xE65100)),
+        (1.0,  NSColor(hex: 0xD32F2F).usingColorSpace(.sRGB) ?? NSColor(hex: 0xD32F2F)),
+    ]
 
-    static func color(for usage: Double) -> Color {
-        palette[Int((max(0, min(1, usage)) * 100.0).rounded())]
+    /// Precomputed 0–100% palettes, built once from the anchors. Lookup is a
+    /// single array index — no interpolation or NSColor bridging at render time.
+    static let palette: [Color] = (0...100).map { interpolate(Double($0) / 100.0, anchors: anchors) }
+    static let lightPalette: [Color] = (0...100).map { interpolate(Double($0) / 100.0, anchors: lightAnchors) }
+
+    static func color(for usage: Double, light: Bool = false) -> Color {
+        let table = light ? lightPalette : palette
+        return table[Int((max(0, min(1, usage)) * 100.0).rounded())]
     }
 
-    private static func interpolate(_ t: Double) -> Color {
+    private static func interpolate(_ t: Double, anchors: [(Double, NSColor)]) -> Color {
         var lower = anchors[0]
         var upper = anchors[anchors.count - 1]
         for i in 0..<(anchors.count - 1) {
@@ -36,7 +48,7 @@ enum ColorScale {
         return Color(nsColor: NSColor.lerp(lower.1, upper.1, CGFloat(localT)))
     }
 
-    static func color(forLevel level: Int) -> Color {
+    static func color(forLevel level: Int, light: Bool = false) -> Color {
         let t: Double
         switch level {
         case 0: t = 0.0
@@ -44,16 +56,16 @@ enum ColorScale {
         case 2: t = 0.66
         default: t = 1.0
         }
-        return color(for: t)
+        return color(for: t, light: light)
     }
 
     /// Three-state memory pressure palette: green normal, orange warning,
     /// red critical. Used by the PRS indicator dot and abbreviation.
-    static func color(forPressureLevel level: Int) -> Color {
+    static func color(forPressureLevel level: Int, light: Bool = false) -> Color {
         switch level {
-        case 0: return color(for: 0.25)
-        case 1: return color(for: 0.66)
-        default: return color(for: 1.0)
+        case 0: return color(for: 0.25, light: light)
+        case 1: return color(for: 0.66, light: light)
+        default: return color(for: 1.0, light: light)
         }
     }
 
@@ -63,8 +75,8 @@ enum ColorScale {
         Double(max(30, min(90, abs(rssi))) - 30) / 60.0
     }
 
-    static func color(forRSSI rssi: Int) -> Color {
-        color(for: normalizedRSSI(rssi))
+    static func color(forRSSI rssi: Int, light: Bool = false) -> Color {
+        color(for: normalizedRSSI(rssi), light: light)
     }
 
 }

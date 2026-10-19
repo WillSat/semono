@@ -18,6 +18,24 @@ final class MenubarContentView: NSView {
         }
     }
 
+    /// While an update check is in flight the status item becomes a small
+    /// spinner instead of the user's chosen metric.
+    var isChecking = false {
+        didSet {
+            guard isChecking != oldValue else { return }
+            if isChecking {
+                startSpinning()
+            } else {
+                stopSpinning()
+            }
+            needsDisplay = true
+            updateAccessibility()
+        }
+    }
+
+    private var spinTimer: Timer?
+    private var spinAngle: CGFloat = 0
+
     // Fonts are created once and held for the app's lifetime. Realizing a
     // font lazily during measurement (CTLineCreateWithAttributedString) can
     // crash CoreText under memory pressure — it built a font-trait dictionary
@@ -92,6 +110,7 @@ final class MenubarContentView: NSView {
 
     /// Width required by the currently displayed content.
     var fittingWidth: CGFloat {
+        if isChecking { return 24 }
         if readout.isIcon { return Self.iconWidth }
         return ceil(max(cachedTopSize.width, cachedBottomSize.width)) + Self.widthPadding
     }
@@ -109,6 +128,11 @@ final class MenubarContentView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+
+        if isChecking {
+            drawSpinner()
+            return
+        }
 
         if readout.isIcon {
             let side = min(bounds.height - 2, 20)
@@ -145,7 +169,54 @@ final class MenubarContentView: NSView {
 
     private func updateAccessibility() {
         setAccessibilityRole(.button)
-        setAccessibilityLabel(readout.accessibility)
+        setAccessibilityLabel(
+            isChecking
+                ? LocaleManager.shared.localized("Checking for Updates…")
+                : readout.accessibility
+        )
+    }
+
+    private func startSpinning() {
+        stopSpinning()
+        spinAngle = 0
+        let timer = Timer(
+            timeInterval: 1.0 / 30.0,
+            target: self,
+            selector: #selector(tickSpinner),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        spinTimer = timer
+    }
+
+    @objc private func tickSpinner() {
+        spinAngle += .pi / 9
+        if spinAngle >= .pi * 2 { spinAngle -= .pi * 2 }
+        needsDisplay = true
+    }
+
+    private func stopSpinning() {
+        spinTimer?.invalidate()
+        spinTimer = nil
+        spinAngle = 0
+    }
+
+    private func drawSpinner() {
+        let side = min(bounds.height - 6, 14)
+        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        let path = NSBezierPath()
+        path.appendArc(
+            withCenter: center,
+            radius: side / 2,
+            startAngle: spinAngle * 180 / .pi,
+            endAngle: (spinAngle + .pi * 1.5) * 180 / .pi,
+            clockwise: false
+        )
+        path.lineWidth = 1.7
+        path.lineCapStyle = .round
+        textColor.setStroke()
+        path.stroke()
     }
 
     /// Pops the menu up below the item. The status bar window uses a flipped
@@ -154,6 +225,10 @@ final class MenubarContentView: NSView {
     /// itself and left-align it instead of centering under the readout).
     private func showMenu() {
         guard let menu else { return }
+        // Activating the accessory app before the menu opens keeps its
+        // programmatic menu items rendered as enabled (Settings, Check for
+        // Updates) instead of the inactive-app dimming.
+        NSApp.activate()
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 5), in: self)
     }
 
@@ -192,4 +267,5 @@ final class MenubarContentView: NSView {
         }
         return resolved
     }
+
 }

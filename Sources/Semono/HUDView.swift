@@ -11,7 +11,7 @@ struct HUDView: View {
                     valCell(label: "CPU", usage: metrics.cpuUsage)
                     valCell(label: "GPU", usage: metrics.gpuUsage)
                     MetricCell(label: "PWR", value: optionalValue(metrics.powerUsage.map(MetricFormat.power), width: 4),
-                               color: metrics.powerUsage == nil ? .white.opacity(0.4) : .white.opacity(0.85))
+                               color: metrics.powerUsage == nil ? missingColor : valueColor)
                 }
             }
 
@@ -24,7 +24,7 @@ struct HUDView: View {
                     valCell(label: "MEM", usage: metrics.memoryUsage)
                     pressureCell
                     MetricCell(label: "SWAP", value: optionalValue(metrics.swapBytes.map(MetricFormat.swap), width: 4),
-                               color: metrics.swapBytes == nil ? .white.opacity(0.4) : ColorScale.color(for: metrics.swapRatio ?? 0))
+                               color: metrics.swapBytes == nil ? missingColor : ColorScale.color(for: metrics.swapRatio ?? 0, light: isLight))
                 }
             }
 
@@ -35,9 +35,9 @@ struct HUDView: View {
             if settings.showStorageColumn {
                 VStack(spacing: 0) {
                     MetricCell(label: "DR", value: optionalValue(metrics.diskReadSpeed.map(MetricFormat.speed), width: 5),
-                               color: metrics.diskReadSpeed == nil ? .white.opacity(0.4) : .white.opacity(0.85))
+                               color: metrics.diskReadSpeed == nil ? missingColor : valueColor)
                     MetricCell(label: "DW", value: optionalValue(metrics.diskWriteSpeed.map(MetricFormat.speed), width: 5),
-                               color: metrics.diskWriteSpeed == nil ? .white.opacity(0.4) : .white.opacity(0.85))
+                               color: metrics.diskWriteSpeed == nil ? missingColor : valueColor)
                     thermalCell
                 }
             }
@@ -58,12 +58,34 @@ struct HUDView: View {
         .padding(.vertical, 1)
         .background(
             RoundedRectangle(cornerRadius: 1)
-                .fill(Color.black.opacity(settings.backgroundOpacity))
+                .fill(backgroundFill)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 1)
+                        .strokeBorder(isLight ? Color.black.opacity(0.10) : Color.clear, lineWidth: 0.5)
+                }
         )
         .fixedSize()
     }
 
     // MARK: - Dimensions
+
+    private var theme: HUDTheme { HUDTheme(rawValue: settings.hudTheme) ?? .dark }
+    private var isLight: Bool { theme == .light }
+
+    private var labelColor: Color { isLight ? .black.opacity(0.58) : .white.opacity(0.4) }
+    private var valueColor: Color { isLight ? .black.opacity(0.86) : .white.opacity(0.85) }
+    private var secondaryValueColor: Color { isLight ? .black.opacity(0.68) : .white.opacity(0.7) }
+    private var missingColor: Color { isLight ? .black.opacity(0.35) : .white.opacity(0.4) }
+    private var backgroundFill: Color {
+        isLight ? .white.opacity(settings.backgroundOpacity) : .black.opacity(settings.backgroundOpacity)
+    }
+    private var dividerColor: Color { isLight ? .black.opacity(0.14) : .white.opacity(0.12) }
+    private var barTrackColor: Color { isLight ? .black.opacity(0.16) : .gray.opacity(0.35) }
+    private var arrowColor: Color {
+        isLight
+            ? Color(red: 0.35, green: 0.20, blue: 0.62)
+            : Color(red: 0.70, green: 0.55, blue: 0.92)
+    }
 
     private var currentFont: String { settings.fontName }
     private var scale: CGFloat { CGFloat(1.0 + settings.fontScale / 10.0) }
@@ -84,14 +106,14 @@ struct HUDView: View {
     @ViewBuilder
     private func valCell(label: String, usage: Double?) -> some View {
         if let usage {
-            let color = ColorScale.color(for: usage)
+            let color = ColorScale.color(for: usage, light: isLight)
             if settings.useBlockDisplay {
                 BarCell(label: label, ratio: usage, color: color)
             } else {
                 MetricCell(label: label, value: fmtPct(usage), color: color)
             }
         } else {
-            MetricCell(label: label, value: MetricFormat.dash(4), color: .white.opacity(0.4))
+            MetricCell(label: label, value: MetricFormat.dash(4), color: missingColor)
         }
     }
 
@@ -104,18 +126,18 @@ struct HUDView: View {
         HStack(spacing: 0) {
             Text("PRS")
                 .font(.custom(currentFont, size: labelFontSz))
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundColor(labelColor)
             Spacer(minLength: minSpacer)
             if let level = metrics.memoryPressureLevel {
                 Text("#\(MemoryPressure.abbreviation(for: level))")
                     .font(.custom(currentFont, size: valueFontSz))
-                    .foregroundColor(ColorScale.color(forPressureLevel: level))
+                    .foregroundColor(ColorScale.color(forPressureLevel: level, light: isLight))
                     .monospacedDigit()
                     .lineLimit(1)
             } else {
                 Text(MetricFormat.dash(4))
                     .font(.custom(currentFont, size: valueFontSz))
-                    .foregroundColor(.white.opacity(0.4))
+                    .foregroundColor(missingColor)
                     .lineLimit(1)
             }
         }
@@ -126,9 +148,9 @@ struct HUDView: View {
     private var thermalCell: some View {
         if let level = metrics.thermalState {
             BarCell(label: "THM", ratio: levelRatio(level),
-                    color: ColorScale.color(forLevel: level))
+                    color: ColorScale.color(forLevel: level, light: isLight))
         } else {
-            MetricCell(label: "THM", value: MetricFormat.dash(4), color: .white.opacity(0.4))
+            MetricCell(label: "THM", value: MetricFormat.dash(4), color: missingColor)
         }
     }
 
@@ -140,7 +162,7 @@ struct HUDView: View {
         HStack(spacing: 0) {
             Text(label)
                 .font(.custom(currentFont, size: labelFontSz))
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundColor(labelColor)
             Spacer(minLength: minSpacer)
             Text(value)
                 .font(.custom(currentFont, size: valueFontSz))
@@ -155,11 +177,11 @@ struct HUDView: View {
         HStack(spacing: 0) {
             Text(label)
                 .font(.custom(currentFont, size: labelFontSz))
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundColor(labelColor)
             Spacer(minLength: minSpacer)
             ZStack(alignment: .leading) {
                 Rectangle()
-                    .fill(Color.gray.opacity(0.35))
+                    .fill(barTrackColor)
                 Rectangle()
                     .fill(color)
                     .frame(width: max(3, barW * CGFloat(max(0, min(1, ratio)))))
@@ -176,31 +198,31 @@ struct HUDView: View {
                 HStack(spacing: 0) {
                     Text(type)
                         .font(.custom(currentFont, size: labelFontSz))
-                        .foregroundColor(.white.opacity(0.4))
+                        .foregroundColor(labelColor)
                     Spacer(minLength: minSpacer)
                     if let rssi = metrics.wifiRSSI {
                         Text(String(format: "%3d", rssi))
                             .font(.custom(currentFont, size: valueFontSz))
-                            .foregroundColor(ColorScale.color(forRSSI: rssi))
+                            .foregroundColor(ColorScale.color(forRSSI: rssi, light: isLight))
                             .monospacedDigit()
                     } else {
                         // rssiValue() == 0 means "unavailable", not 0 dBm.
                         Text("  \u{2014}")
                             .font(.custom(currentFont, size: valueFontSz))
-                            .foregroundColor(.white.opacity(0.4))
+                            .foregroundColor(missingColor)
                     }
                 }
                 .frame(height: cellHeight)
             } else {
                 Text(type)
                     .font(.custom(currentFont, size: valueFontSz))
-                    .foregroundColor(.white.opacity(0.7))
+                    .foregroundColor(secondaryValueColor)
                     .frame(height: cellHeight)
             }
         } else {
             Text("\u{2014}")
                 .font(.custom(currentFont, size: valueFontSz))
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundColor(missingColor)
                 .frame(height: cellHeight)
         }
     }
@@ -209,11 +231,11 @@ struct HUDView: View {
         HStack(spacing: 0) {
             Text(arrow)
                 .font(.custom(currentFont, size: valueFontSz))
-                .foregroundColor(Color(red: 0.70, green: 0.55, blue: 0.92))
+                .foregroundColor(arrowColor)
             Spacer(minLength: minSpacer)
             Text(speed.map(MetricFormat.speed) ?? MetricFormat.dash(5))
                 .font(.custom(currentFont, size: valueFontSz))
-                .foregroundColor(speed == nil ? .white.opacity(0.4) : .white.opacity(0.85))
+                .foregroundColor(speed == nil ? missingColor : valueColor)
                 .monospacedDigit()
                 .lineLimit(1)
         }
@@ -224,7 +246,7 @@ struct HUDView: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.12))
+            .fill(dividerColor)
             .frame(width: 1)
             .padding(.vertical, 2)
             .padding(.horizontal, 3)
