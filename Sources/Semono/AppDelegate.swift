@@ -125,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 guard let view = self.menubarView, let menu = view.menu else { return }
                 NSApp.activate()
+                menu.appearance = MenubarContentView.systemMenuAppearance()
                 menu.popUp(
                     positioning: nil,
                     at: NSPoint(x: 0, y: view.bounds.height + 5),
@@ -544,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // AppDelegate.
         menu.autoenablesItems = false
         menu.delegate = self
-        menu.appearance = NSApp.effectiveAppearance
+        menu.appearance = MenubarContentView.systemMenuAppearance()
 
         let hudItem = NSMenuItem(
             title: LocaleManager.shared.localized("Show HUD"),
@@ -825,7 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The status menu otherwise inherits the menu bar's vibrant appearance,
         // which can be dark even when the app windows and system menus are
         // light. Follow the app's effective appearance instead.
-        menu.appearance = NSApp.effectiveAppearance
+        menu.appearance = MenubarContentView.systemMenuAppearance()
         // Refresh the update entry at the last moment so a check that finished
         // while the menu was closed is reflected immediately.
         refreshUpdateMenuState()

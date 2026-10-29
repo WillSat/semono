@@ -13,6 +13,7 @@ A lightweight menu bar app with a floating pixel-art HUD for macOS.
 - Four-corner positioning with independent horizontal and vertical margins, plus optional full-screen Spaces.
 - Menu bar readout: CPU / GPU / PWR / MEM / PRS / NET / icon only, with a Show HUD toggle.
 - Device Information window for browsing `system_profiler` categories, with search and grouped fields.
+- Memory page in Device Information with composition, pressure, swap and top-app memory, refreshed only while open.
 - Sampling follows what is on screen, so hidden surfaces do not keep their metrics alive.
 - Native Settings window for appearance, columns, menu bar, position and startup.
 

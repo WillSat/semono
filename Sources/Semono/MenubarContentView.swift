@@ -229,7 +229,20 @@ final class MenubarContentView: NSView {
         // programmatic menu items rendered as enabled (Settings, Check for
         // Updates) instead of the inactive-app dimming.
         NSApp.activate()
+        // AppKit resolves the menu appearance before menuWillOpen, so apply
+        // the current system appearance here as well; otherwise the first
+        // open after a light/dark switch uses the previous theme.
+        menu.appearance = Self.systemMenuAppearance()
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 5), in: self)
+    }
+
+    /// A concrete appearance from the current effective appearance. Reusing
+    /// the dynamic NSApp.effectiveAppearance object can leave AppKit with the
+    /// previous menu window appearance until it is reopened.
+    static func systemMenuAppearance() -> NSAppearance {
+        let match = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+        let name: NSAppearance.Name = match == .darkAqua ? .darkAqua : .aqua
+        return NSAppearance(named: name) ?? NSApp.effectiveAppearance
     }
 
     /// Resolves the dynamic label color against a specific appearance so the

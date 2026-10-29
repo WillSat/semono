@@ -334,6 +334,18 @@ final class LocaleManager: ObservableObject {
         "Check GitHub for a newer version.": "从 GitHub 检查是否有新版本。",
         "Startup, language, updates and reset.": "启动、语言、更新与重置。",
         "The HUD stays in the corner selected in Settings → HUD. Use the corner and margin controls there.": "HUD 会固定在「设置 → HUD」中所选的位置；可在那里调整角落和边距。",
+        "Memory Composition": "内存组成",
+        "Total": "总计",
+        "Used": "已用",
+        "App Memory": "应用内存",
+        "Wired": "固定内存",
+        "Compressed": "压缩内存",
+        "Cached Files": "缓存文件",
+        "Free": "可用",
+        "Pressure & Swap": "压力与交换",
+        "Swap": "交换空间",
+        "Top Applications": "占用最高的应用",
+        "Includes live memory monitoring.": "包含实时内存监控。",
     ]
 
     private static let zhHantStrings: [String: String] = [
@@ -525,6 +537,18 @@ final class LocaleManager: ObservableObject {
         "Check GitHub for a newer version.": "從 GitHub 檢查是否有新版本。",
         "Startup, language, updates and reset.": "啟動、語言、更新與重置。",
         "The HUD stays in the corner selected in Settings → HUD. Use the corner and margin controls there.": "HUD 會固定在「設定 → HUD」中所選的位置；可在該處調整角落和邊距。",
+        "Memory Composition": "記憶體組成",
+        "Total": "總計",
+        "Used": "已用",
+        "App Memory": "應用記憶體",
+        "Wired": "固定記憶體",
+        "Compressed": "壓縮記憶體",
+        "Cached Files": "快取檔案",
+        "Free": "可用",
+        "Pressure & Swap": "壓力與交換",
+        "Swap": "交換空間",
+        "Top Applications": "佔用最高的應用程式",
+        "Includes live memory monitoring.": "包含即時記憶體監控。",
     ]
 
     private static let jaStrings: [String: String] = [
@@ -716,6 +740,18 @@ final class LocaleManager: ObservableObject {
         "Check GitHub for a newer version.": "GitHub で新しいバージョンを確認します。",
         "Startup, language, updates and reset.": "起動、言語、アップデート、リセット。",
         "The HUD stays in the corner selected in Settings → HUD. Use the corner and margin controls there.": "HUD は「設定 → HUD」で選んだ位置に固定されます。コーナーとマージンはそこで調整できます。",
+        "Memory Composition": "メモリ構成",
+        "Total": "合計",
+        "Used": "使用中",
+        "App Memory": "アプリメモリ",
+        "Wired": "ワイヤード",
+        "Compressed": "圧縮",
+        "Cached Files": "キャッシュファイル",
+        "Free": "空き",
+        "Pressure & Swap": "プレッシャーとスワップ",
+        "Swap": "スワップ",
+        "Top Applications": "メモリ使用量の多いアプリ",
+        "Includes live memory monitoring.": "リアルタイムのメモリ監視を含みます。",
     ]
 
     private static let koStrings: [String: String] = [
@@ -907,6 +943,18 @@ final class LocaleManager: ObservableObject {
         "Check GitHub for a newer version.": "GitHub에서 새 버전을 확인합니다.",
         "Startup, language, updates and reset.": "시작, 언어, 업데이트 및 재설정.",
         "The HUD stays in the corner selected in Settings → HUD. Use the corner and margin controls there.": "HUD는 '설정 → HUD'에서 선택한 모서리에 고정됩니다. 해당 화면에서 모서리와 여백을 조정할 수 있습니다.",
+        "Memory Composition": "메모리 구성",
+        "Total": "전체",
+        "Used": "사용 중",
+        "App Memory": "앱 메모리",
+        "Wired": "고정 메모리",
+        "Compressed": "압축",
+        "Cached Files": "캐시 파일",
+        "Free": "여유",
+        "Pressure & Swap": "압력 및 스왑",
+        "Swap": "스왑",
+        "Top Applications": "메모리 사용량 상위 앱",
+        "Includes live memory monitoring.": "실시간 메모리 모니터링이 포함됩니다.",
     ]
 
     private static let esStrings: [String: String] = [
@@ -1098,6 +1146,18 @@ final class LocaleManager: ObservableObject {
         "Check GitHub for a newer version.": "Busca una versión más reciente en GitHub.",
         "Startup, language, updates and reset.": "Inicio, idioma, actualizaciones y restablecimiento.",
         "The HUD stays in the corner selected in Settings → HUD. Use the corner and margin controls there.": "El HUD permanece en la esquina seleccionada en Ajustes → HUD. Ajusta la esquina y los márgenes allí.",
+        "Memory Composition": "Composición de memoria",
+        "Total": "Total",
+        "Used": "En uso",
+        "App Memory": "Memoria de apps",
+        "Wired": "Fija",
+        "Compressed": "Comprimida",
+        "Cached Files": "Archivos en caché",
+        "Free": "Libre",
+        "Pressure & Swap": "Presión y swap",
+        "Swap": "Swap",
+        "Top Applications": "Aplicaciones con más memoria",
+        "Includes live memory monitoring.": "Incluye monitorización de memoria en tiempo real.",
     ]
 
     private static let emojiStrings: [String: String] = [
@@ -1289,5 +1349,17 @@ final class LocaleManager: ObservableObject {
         "Check GitHub for a newer version.": "🐙🔄",
         "Startup, language, updates and reset.": "🚀🌐🔄",
         "The HUD stays in the corner selected in Settings → HUD. Use the corner and margin controls there.": "🪟📍⚙️",
+        "Memory Composition": "🧠📊",
+        "Total": "🧮",
+        "Used": "✅",
+        "App Memory": "🧩",
+        "Wired": "📌",
+        "Compressed": "🗜️",
+        "Cached Files": "🗂️",
+        "Free": "⬜",
+        "Pressure & Swap": "🌡️🔁",
+        "Swap": "🔁",
+        "Top Applications": "🏆",
+        "Includes live memory monitoring.": "📊▶️",
     ]
 }
