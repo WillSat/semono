@@ -41,6 +41,7 @@ final class SettingsStore: ObservableObject {
         static let hudMarginVertical: Double = 0
         static let showHUD = true
         static let showInFullscreen = false
+        static let hideHUDNearPointer = false
         static let fontName = "DepartureMono-Regular"
         static let fontScale: Double = 0
         static let statusBarMetric = StatusBarMetric.memory.rawValue
@@ -85,6 +86,7 @@ final class SettingsStore: ObservableObject {
     @AppStorage("hudMarginVertical") var hudMarginVertical = Defaults.hudMarginVertical
     @AppStorage("showHUD") var showHUD = Defaults.showHUD
     @AppStorage("showInFullscreen") var showInFullscreen = Defaults.showInFullscreen
+    @AppStorage("hideHUDNearPointer") var hideHUDNearPointer = Defaults.hideHUDNearPointer
     @AppStorage("fontName") var fontName = Defaults.fontName
     @AppStorage("fontScale") var fontScale = Defaults.fontScale
     @AppStorage("statusBarMetric") var statusBarMetric = Defaults.statusBarMetric
@@ -157,6 +159,7 @@ final class SettingsStore: ObservableObject {
         hudMarginVertical = Defaults.hudMarginVertical
         showHUD = Defaults.showHUD
         showInFullscreen = Defaults.showInFullscreen
+        hideHUDNearPointer = Defaults.hideHUDNearPointer
         fontName = Defaults.fontName
         fontScale = Defaults.fontScale
         statusBarMetric = Defaults.statusBarMetric

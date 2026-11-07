@@ -193,6 +193,11 @@ struct SettingsView: View {
                     description: t("Keep the HUD visible over full-screen apps."),
                     isOn: $settings.showInFullscreen
                 )
+                SettingsToggleRow(
+                    title: t("Hide When Near"),
+                    description: t("Hides the HUD when the pointer is close to it."),
+                    isOn: $settings.hideHUDNearPointer
+                )
             }
 
             positionCard

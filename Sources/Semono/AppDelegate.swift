@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var window: NSWindow?
     private var hudWindowDelegate: WindowDelegate?
+    private var hudProximityTimer: Timer?
+    private var isHUDPointerHidden = false
     private var statusItem: NSStatusItem?
     private var menubarView: MenubarContentView?
     let metrics = MetricsCollector()
@@ -46,6 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Delay before the first size save/re-anchor so the initial auto-size
     /// settles.
     private static let initialFrameSaveDelay: TimeInterval = 0.1
+    /// Hide the HUD before the pointer reaches it, and keep it hidden until the
+    /// pointer has clearly moved away to avoid flicker at the boundary.
+    private static let hudHideDistance: CGFloat = 24
+    private static let hudRestoreDistance: CGFloat = 48
     /// Minimum status bar item width so the readout stays comfortably clickable.
     private static let statusBarMinWidth: CGFloat = 28
     private static let firstRunGuideKey = "hasShownFirstRunGuide"
@@ -73,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startSpaceObservation()
         showHUD()
         metrics.start()
+        syncHUDPointerMonitoring()
         startStatusBarVisibilityMonitoring()
         startWakeObservation()
         syncLoginItemState()
@@ -312,6 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             metrics.wake()
         }
 
+        syncHUDPointerMonitoring()
         syncOverlayMembership()
         applyHUDFrameIfChanged()
         updateOverlayState()
@@ -354,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         w.orderOut(nil)
         w.collectionBehavior = OverlaySpacePolicy.collectionBehavior(showInFullscreen: show)
-        if SettingsStore.shared.showHUD, show || w.isOnActiveSpace {
+        if SettingsStore.shared.showHUD, !isHUDPointerHidden, show || w.isOnActiveSpace {
             w.orderFrontRegardless()
         }
 
@@ -379,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateOverlayState(refreshStatusBarVisibility: Bool = false) {
         guard let w = window else { return }
 
-        let showHUD = SettingsStore.shared.showHUD
+        let showHUD = SettingsStore.shared.showHUD && !isHUDPointerHidden
         if showHUD {
             // A swap that leaves the HUD ordered out although it belongs on the
             // active Space would keep it hidden until the next Space change;
@@ -404,6 +412,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         metrics.setScope(
             SamplingScope.resolve(hudVisible: hudVisible, statusBarVisible: statusBarVisible)
         )
+    }
+
+    /// Starts or stops the low-frequency pointer probe used by Hide When Near.
+    /// The probe only exists while the HUD is shown and the setting is on.
+    private func syncHUDPointerMonitoring() {
+        let shouldMonitor = SettingsStore.shared.showHUD
+            && SettingsStore.shared.hideHUDNearPointer
+        guard shouldMonitor else {
+            hudProximityTimer?.invalidate()
+            hudProximityTimer = nil
+            if isHUDPointerHidden {
+                isHUDPointerHidden = false
+                updateOverlayState()
+                metrics.wake()
+            }
+            return
+        }
+
+        if hudProximityTimer == nil {
+            let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.updateHUDPointerState() }
+            }
+            timer.tolerance = 0.02
+            RunLoop.main.add(timer, forMode: .common)
+            hudProximityTimer = timer
+        }
+        updateHUDPointerState()
+    }
+
+    private func updateHUDPointerState() {
+        guard SettingsStore.shared.showHUD,
+              SettingsStore.shared.hideHUDNearPointer,
+              let window
+        else {
+            guard isHUDPointerHidden else { return }
+            isHUDPointerHidden = false
+            updateOverlayState()
+            metrics.wake()
+            return
+        }
+
+        let point = NSEvent.mouseLocation
+        let frame = window.frame
+        let dx = max(0, max(frame.minX - point.x, point.x - frame.maxX))
+        let dy = max(0, max(frame.minY - point.y, point.y - frame.maxY))
+        let distance = sqrt(dx * dx + dy * dy)
+        let threshold = isHUDPointerHidden
+            ? Self.hudRestoreDistance
+            : Self.hudHideDistance
+        let shouldHide = distance <= threshold
+        guard shouldHide != isHUDPointerHidden else { return }
+
+        isHUDPointerHidden = shouldHide
+        updateOverlayState()
+        metrics.wake()
     }
 
     // MARK: - HUD Window
@@ -433,6 +496,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         w.backgroundColor = .clear
         w.hasShadow = false
         w.animationBehavior = .none
+        // The HUD is a passive readout: every click passes through it.
+        w.ignoresMouseEvents = true
         w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         // The membership is set at creation from the current setting, which is
         // what makes a launch while the user sits in a full-screen Space
@@ -905,6 +970,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleHUD() {
         SettingsStore.shared.showHUD.toggle()
         refreshHUDMenuState()
+        syncHUDPointerMonitoring()
         updateOverlayState()
         if SettingsStore.shared.showHUD {
             reposition()

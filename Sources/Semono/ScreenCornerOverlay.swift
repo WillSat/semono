@@ -48,6 +48,8 @@ final class ScreenCornerOverlayController {
     private var rightWindow: ScreenCornerMaskWindow?
     private var observers: [NSObjectProtocol] = []
     private var hoverTimer: Timer?
+    private var membershipSettleTask: Task<Void, Never>?
+    private var appliedShowInFullscreen: Bool?
     private var started = false
 
     private init() {}
@@ -71,6 +73,16 @@ final class ScreenCornerOverlayController {
         ) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         })
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append(workspace.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        })
+
         refresh()
     }
 
@@ -82,6 +94,12 @@ final class ScreenCornerOverlayController {
             removeOverlays()
             return
         }
+
+        let showsInFullScreen = defaults.bool(
+            forKey: ScreenCornerSettings.showInFullScreenKey
+        )
+        let createdWindows = leftWindow == nil || rightWindow == nil
+        let membershipChanged = appliedShowInFullscreen != showsInFullScreen
 
         let mode = ScreenCornerMode(
             rawValue: defaults.string(forKey: ScreenCornerSettings.modeKey) ?? ""
@@ -104,23 +122,38 @@ final class ScreenCornerOverlayController {
                 to: ScreenCornerSettings.curvatureRange
             ))
         }
-        let showsInFullScreen = defaults.bool(
-            forKey: ScreenCornerSettings.showInFullScreenKey
-        )
-
         if leftWindow == nil {
             leftWindow = ScreenCornerMaskWindow(
                 corner: .bottomLeft,
                 radius: radius,
-                curvature: curvature
+                curvature: curvature,
+                showsInFullScreen: showsInFullScreen
             )
         }
         if rightWindow == nil {
             rightWindow = ScreenCornerMaskWindow(
                 corner: .bottomRight,
                 radius: radius,
-                curvature: curvature
+                curvature: curvature,
+                showsInFullScreen: showsInFullScreen
             )
+        }
+
+        if membershipChanged {
+            appliedShowInFullscreen = showsInFullScreen
+            leftWindow?.orderOut(nil)
+            rightWindow?.orderOut(nil)
+            let behavior = OverlaySpacePolicy.collectionBehavior(
+                showInFullscreen: showsInFullScreen
+            )
+            leftWindow?.collectionBehavior = behavior
+            rightWindow?.collectionBehavior = behavior
+            membershipSettleTask?.cancel()
+            membershipSettleTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                self?.refresh()
+            }
         }
 
         let frame = screen.frame
@@ -134,15 +167,22 @@ final class ScreenCornerOverlayController {
             radius: radius,
             curvature: curvature
         )
-        leftWindow?.setShowsInFullScreen(showsInFullScreen)
-        rightWindow?.setShowsInFullScreen(showsInFullScreen)
-        leftWindow?.orderFrontRegardless()
-        rightWindow?.orderFrontRegardless()
-        startHoverTracking()
+        if createdWindows || showsInFullScreen || leftWindow?.isOnActiveSpace == true {
+            leftWindow?.orderFrontRegardless()
+            rightWindow?.orderFrontRegardless()
+            startHoverTracking()
+        } else {
+            leftWindow?.orderOut(nil)
+            rightWindow?.orderOut(nil)
+            stopHoverTracking()
+        }
     }
 
     private func removeOverlays() {
         stopHoverTracking()
+        membershipSettleTask?.cancel()
+        membershipSettleTask = nil
+        appliedShowInFullscreen = nil
         leftWindow?.orderOut(nil)
         leftWindow?.close()
         leftWindow = nil
@@ -196,7 +236,12 @@ final class ScreenCornerOverlayController {
 }
 
 private final class ScreenCornerMaskWindow: NSWindow {
-    init(corner: ScreenCorner, radius: CGFloat, curvature: CGFloat) {
+    init(
+        corner: ScreenCorner,
+        radius: CGFloat,
+        curvature: CGFloat,
+        showsInFullScreen: Bool
+    ) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: radius, height: radius),
             styleMask: [.borderless],
@@ -222,26 +267,10 @@ private final class ScreenCornerMaskWindow: NSWindow {
         // The fake corners are a display effect, never part of a capture.
         sharingType = .none
         level = .screenSaver
-        collectionBehavior = [
-            .canJoinAllSpaces,
-            .stationary,
-            .ignoresCycle,
-        ]
+        collectionBehavior = OverlaySpacePolicy.collectionBehavior(
+            showInFullscreen: showsInFullScreen
+        )
     }
-
-    private var showsInFullScreen = false
-
-    func setShowsInFullScreen(_ show: Bool) {
-        guard show != showsInFullScreen else { return }
-        showsInFullScreen = show
-        if show {
-            collectionBehavior.insert(.fullScreenAuxiliary)
-        } else {
-            collectionBehavior.remove(.fullScreenAuxiliary)
-        }
-    }
-
-
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }

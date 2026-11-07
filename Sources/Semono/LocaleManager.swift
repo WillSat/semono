@@ -370,6 +370,8 @@ final class LocaleManager: ObservableObject {
         "Corners sit above all windows, fade on hover and pass clicks through.": "圆角位于所有窗口之上，悬停时淡出，点击始终透传。",
         "Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.": "“贴合应用窗口”使用固定的 macOS 27 参考值；“高级”可调整半径与曲率。",
         "Show in Full Screen is off by default. Screenshots and recordings never include the corners.": "“在全屏中显示”默认关闭。截图和录屏永远不会包含圆角。",
+        "Hide When Near": "靠近时隐藏",
+        "Hides the HUD when the pointer is close to it.": "指针靠近 HUD 时自动隐藏。",
     ]
 
     private static let zhHantStrings: [String: String] = [
@@ -597,6 +599,8 @@ final class LocaleManager: ObservableObject {
         "Corners sit above all windows, fade on hover and pass clicks through.": "圓角位於所有視窗之上，懸停時淡出，點擊始終透傳。",
         "Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.": "「貼合應用程式視窗」使用固定的 macOS 27 參考值；「進階」可調整半徑與曲率。",
         "Show in Full Screen is off by default. Screenshots and recordings never include the corners.": "「在全螢幕中顯示」預設關閉。截圖和螢幕錄影永遠不會包含圓角。",
+        "Hide When Near": "靠近時隱藏",
+        "Hides the HUD when the pointer is close to it.": "指標靠近 HUD 時自動隱藏。",
     ]
 
     private static let jaStrings: [String: String] = [
@@ -824,6 +828,8 @@ final class LocaleManager: ObservableObject {
         "Corners sit above all windows, fade on hover and pass clicks through.": "角丸はすべてのウインドウより前面に表示され、ホバーでフェードし、クリックは常に通過します。",
         "Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.": "「アプリウインドウに合わせる」は固定の macOS 27 参照値を使用し、「詳細設定」では半径と曲率を調整できます。",
         "Show in Full Screen is off by default. Screenshots and recordings never include the corners.": "「フルスクリーンで表示」はデフォルトでオフです。スクリーンショットや画面収録に角丸は含まれません。",
+        "Hide When Near": "近づくと隠す",
+        "Hides the HUD when the pointer is close to it.": "ポインタが HUD に近づくと自動的に隠します。",
     ]
 
     private static let koStrings: [String: String] = [
@@ -1051,6 +1057,8 @@ final class LocaleManager: ObservableObject {
         "Corners sit above all windows, fade on hover and pass clicks through.": "모서리는 모든 윈도우 위에 있으며, 가리키면 사라지고 클릭은 항상 통과합니다.",
         "Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.": "'앱 윈도우에 맞춤'은 고정된 macOS 27 참조값을 사용하며, '고급'에서는 반경과 곡률을 조정할 수 있습니다.",
         "Show in Full Screen is off by default. Screenshots and recordings never include the corners.": "'전체 화면에서 표시'는 기본적으로 꺼져 있습니다. 스크린샷과 화면 기록에는 모서리가 포함되지 않습니다.",
+        "Hide When Near": "가까이 가면 숨기기",
+        "Hides the HUD when the pointer is close to it.": "포인터가 HUD에 가까워지면 자동으로 숨깁니다.",
     ]
 
     private static let esStrings: [String: String] = [
@@ -1278,6 +1286,8 @@ final class LocaleManager: ObservableObject {
         "Corners sit above all windows, fade on hover and pass clicks through.": "Las esquinas están por encima de todas las ventanas, se desvanecen al pasar el cursor y los clics siempre pasan.",
         "Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.": "«Ajustar a ventanas de apps» usa la referencia fija de macOS 27; «Avanzado» permite ajustar radio y curvatura.",
         "Show in Full Screen is off by default. Screenshots and recordings never include the corners.": "«Mostrar en pantalla completa» está desactivado por defecto. Las capturas y grabaciones nunca incluyen las esquinas.",
+        "Hide When Near": "Ocultar al acercarse",
+        "Hides the HUD when the pointer is close to it.": "Oculta el HUD cuando el puntero se acerca.",
     ]
 
     private static let emojiStrings: [String: String] = [
@@ -1505,5 +1515,7 @@ final class LocaleManager: ObservableObject {
         "Corners sit above all windows, fade on hover and pass clicks through.": "🖥️⭕👆💧🖱️➡️",
         "Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.": "🪟✅📐⚙️",
         "Show in Full Screen is off by default. Screenshots and recordings never include the corners.": "🖥️🔳🚫📸",
+        "Hide When Near": "👆🙈",
+        "Hides the HUD when the pointer is close to it.": "👆🫥",
     ]
 }
