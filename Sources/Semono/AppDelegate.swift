@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Checkable "Show HUD" item, kept in sync with the persisted setting.
     private var hudMenuItem: NSMenuItem?
     private var infoMenuItem: NSMenuItem?
+    private var toolsMenuItem: NSMenuItem?
     private var guideMenuItem: NSMenuItem?
     private var updateMenuItem: NSMenuItem?
     private var settingsMenuItem: NSMenuItem?
@@ -66,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pruneLegacyDefaults()
         registerFont()
         setupStatusBar()
+        ScreenCornerOverlayController.shared.start()
         // Registering the Space observers first means the HUD's own state is
         // translated into a sampling scope from the moment the window exists.
         startSpaceObservation()
@@ -106,6 +108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 NSApp.activate()
                 WindowRouter.openDeviceInfo?()
+            }
+        }
+        if CommandLine.arguments.contains("--open-tools") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSApp.activate()
+                WindowRouter.openTools?()
             }
         }
         if CommandLine.arguments.contains("--open-guide") {
@@ -554,40 +562,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         hudItem.target = self
         hudItem.state = SettingsStore.shared.showHUD ? .on : .off
-        hudItem.image = NSImage(
-            systemSymbolName: SettingsStore.shared.showHUD ? "eye" : "eye.slash",
-            accessibilityDescription: LocaleManager.shared.localized("Show HUD")
-        )
         menu.addItem(hudItem)
         hudMenuItem = hudItem
 
         menu.addItem(NSMenuItem.separator())
 
         let infoItem = NSMenuItem(
-            title: LocaleManager.shared.localized("Device Information..."),
+            title: menuTitle("Device Information"),
             action: #selector(openDeviceInfo),
             keyEquivalent: "i"
         )
         infoItem.target = self
-        infoItem.image = NSImage(
-            systemSymbolName: "desktopcomputer",
-            accessibilityDescription: LocaleManager.shared.localized("Device Information")
-        )
         menu.addItem(infoItem)
         infoMenuItem = infoItem
 
-        let guideItem = NSMenuItem(
-            title: LocaleManager.shared.localized("User Guide"),
-            action: #selector(openGuide),
+        let toolsItem = NSMenuItem(
+            title: menuTitle("Tools"),
+            action: #selector(openTools),
             keyEquivalent: ""
         )
-        guideItem.target = self
-        guideItem.image = NSImage(
-            systemSymbolName: "book",
-            accessibilityDescription: LocaleManager.shared.localized("User Guide")
-        )
-        menu.addItem(guideItem)
-        guideMenuItem = guideItem
+        toolsItem.target = self
+        menu.addItem(toolsItem)
+        toolsMenuItem = toolsItem
 
         menu.addItem(NSMenuItem.separator())
 
@@ -597,15 +593,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: ""
         )
         updateItem.target = self
-        updateItem.image = NSImage(
-            systemSymbolName: "arrow.triangle.2.circlepath",
-            accessibilityDescription: LocaleManager.shared.localized("Check for Updates…")
-        )
         menu.addItem(updateItem)
         updateMenuItem = updateItem
 
         let settingsItem = NSMenuItem(
-            title: LocaleManager.shared.localized("Settings..."),
+            title: menuTitle("Settings..."),
             action: #selector(openSettings),
             keyEquivalent: ","
         )
@@ -613,16 +605,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(settingsItem)
         settingsMenuItem = settingsItem
 
+        let guideItem = NSMenuItem(
+            title: menuTitle("User Guide"),
+            action: #selector(openGuide),
+            keyEquivalent: ""
+        )
+        guideItem.target = self
+        menu.addItem(guideItem)
+        guideMenuItem = guideItem
+
         let aboutItem = NSMenuItem(
-            title: LocaleManager.shared.localized("About Semono"),
+            title: menuTitle("About Semono"),
             action: #selector(openAbout),
             keyEquivalent: ""
         )
         aboutItem.target = self
-        aboutItem.image = NSImage(
-            systemSymbolName: "info.circle",
-            accessibilityDescription: LocaleManager.shared.localized("About Semono")
-        )
         menu.addItem(aboutItem)
         aboutMenuItem = aboutItem
 
@@ -636,6 +633,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
         quitMenuItem = quitItem
+        applyMenuImages(in: menu)
         view.menu = menu
 
         // Configure the readout before the view is inserted: icon-only mode is
@@ -721,9 +719,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isEnabled = true
             item.action = #selector(performUpdateAction)
         }
-        item.image = NSImage(
-            systemSymbolName: checker.hasUpdate ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath",
-            accessibilityDescription: item.title
+        item.image = menuIcon(
+            checker.hasUpdate ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath",
+            description: item.title,
+            appearance: NSApp.effectiveAppearance
         )
     }
 
@@ -732,13 +731,126 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refreshMenuTitles() {
         let locale = LocaleManager.shared
         hudMenuItem?.title = locale.localized("Show HUD")
-        infoMenuItem?.title = locale.localized("Device Information...")
-        guideMenuItem?.title = locale.localized("User Guide")
-        settingsMenuItem?.title = locale.localized("Settings...")
-        aboutMenuItem?.title = locale.localized("About Semono")
+        infoMenuItem?.title = menuTitle("Device Information")
+        toolsMenuItem?.title = menuTitle("Tools")
+        guideMenuItem?.title = menuTitle("User Guide")
+        settingsMenuItem?.title = menuTitle("Settings...")
+        aboutMenuItem?.title = menuTitle("About Semono")
         quitMenuItem?.title = locale.localized("Quit Semono")
         refreshHUDMenuState()
         refreshUpdateMenuState()
+    }
+
+    /// A window-opening menu item gets one Unicode ellipsis, regardless of
+    /// whether the localization already contains ASCII dots or a Unicode
+    /// ellipsis. Toggles and Quit deliberately stay unfinished.
+    private func menuTitle(_ key: String) -> String {
+        var title = LocaleManager.shared.localized(key)
+        while title.hasSuffix(".") || title.hasSuffix("…") {
+            title.removeLast()
+        }
+        return title + "…"
+    }
+
+    private func applyMenuImages(in menu: NSMenu) {
+        let appearance = menu.appearance ?? NSApp.effectiveAppearance
+        let locale = LocaleManager.shared
+        setMenuImage(
+            hudMenuItem,
+            systemName: SettingsStore.shared.showHUD ? "eye" : "eye.slash",
+            description: locale.localized("Show HUD"),
+            appearance: appearance
+        )
+        setMenuImage(
+            infoMenuItem,
+            systemName: "desktopcomputer",
+            description: locale.localized("Device Information"),
+            appearance: appearance
+        )
+        setMenuImage(
+            toolsMenuItem,
+            systemName: "wrench.and.screwdriver",
+            description: locale.localized("Tools"),
+            appearance: appearance
+        )
+        setMenuImage(
+            guideMenuItem,
+            systemName: "book",
+            description: locale.localized("User Guide"),
+            appearance: appearance
+        )
+        setMenuImage(
+            updateMenuItem,
+            systemName: UpdateChecker.shared.hasUpdate
+                ? "arrow.down.circle.fill"
+                : "arrow.triangle.2.circlepath",
+            description: updateMenuItem?.title ?? locale.localized("Check for Updates…"),
+            appearance: appearance
+        )
+        setMenuImage(
+            settingsMenuItem,
+            systemName: "gearshape",
+            description: menuTitle("Settings..."),
+            appearance: appearance
+        )
+        setMenuImage(
+            aboutMenuItem,
+            systemName: "info.circle",
+            description: locale.localized("About Semono"),
+            appearance: appearance
+        )
+    }
+
+    private func setMenuImage(
+        _ item: NSMenuItem?,
+        systemName: String,
+        description: String,
+        appearance: NSAppearance
+    ) {
+        item?.image = menuIcon(
+            systemName,
+            description: description,
+            appearance: appearance
+        )
+    }
+
+    /// SF Symbol menu-item images are template images, which AppKit does not
+    /// reliably draw in this status menu. Render the symbol into a small,
+    /// non-template canvas tinted with the current label color instead.
+    private func menuIcon(
+        _ systemName: String,
+        description: String,
+        appearance: NSAppearance
+    ) -> NSImage? {
+        guard let symbol = NSImage(
+            systemSymbolName: systemName,
+            accessibilityDescription: description
+        )?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular)) else {
+            return nil
+        }
+
+        let canvas = NSSize(width: 16, height: 16)
+        let image = NSImage(size: canvas, flipped: false) { rect in
+            appearance.performAsCurrentDrawingAppearance {
+                let natural = symbol.size
+                guard natural.width > 0, natural.height > 0 else { return }
+                let scale = min(1, min(rect.width / natural.width, rect.height / natural.height))
+                let drawSize = NSSize(
+                    width: natural.width * scale,
+                    height: natural.height * scale
+                )
+                let origin = NSPoint(
+                    x: (rect.width - drawSize.width) / 2,
+                    y: (rect.height - drawSize.height) / 2
+                )
+                symbol.draw(in: NSRect(origin: origin, size: drawSize))
+                NSColor.labelColor.setFill()
+                rect.fill(using: .sourceAtop)
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     /// Keeps the checkmark and the eye glyph in step with the persisted
@@ -747,9 +859,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let desired: NSControl.StateValue = SettingsStore.shared.showHUD ? .on : .off
         guard let item = hudMenuItem, item.state != desired else { return }
         item.state = desired
-        item.image = NSImage(
-            systemSymbolName: desired == .on ? "eye" : "eye.slash",
-            accessibilityDescription: LocaleManager.shared.localized("Show HUD")
+        item.image = menuIcon(
+            desired == .on ? "eye" : "eye.slash",
+            description: LocaleManager.shared.localized("Show HUD"),
+            appearance: NSApp.effectiveAppearance
         )
     }
 
@@ -812,6 +925,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         WindowRouter.openSettings?()
     }
 
+    @objc private func openTools() {
+        NSApp.activate()
+        WindowRouter.openTools?()
+    }
+
     @objc private func openGuide() {
         NSApp.activate()
         WindowRouter.openGuide?()
@@ -830,6 +948,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Refresh the update entry at the last moment so a check that finished
         // while the menu was closed is reflected immediately.
         refreshUpdateMenuState()
+        applyMenuImages(in: menu)
     }
 
     @objc private func performUpdateAction() {

@@ -1,15 +1,16 @@
 import AppKit
 import SwiftUI
 
-/// Detailed memory composition, pressure, swap, and the apps using the most
-/// memory. Embedded in Device Information's Memory page; the store owns its
-/// own timer and runs only while the section is visible.
-struct MemoryDetailSection: View {
+/// Live memory composition, pressure, swap, and the apps using the most
+/// memory. Shown as a tool; the store owns its own timer and runs only while
+/// this view is visible.
+struct MemoryMonitorView: View {
     @ObservedObject private var locale = LocaleManager.shared
     @Environment(\.colorScheme) private var colorScheme
-    @StateObject private var store = MemoryDetailStore()
-    @AppStorage("memoryDetailRefreshInterval") private var refreshInterval = 3
+    @StateObject private var store = MemoryMonitorStore()
+    @AppStorage("memoryMonitorRefreshInterval") private var refreshInterval = 3
 
+    private static let legacyRefreshIntervalKey = "memoryDetailRefreshInterval"
     private let refreshOptions = [1, 2, 3, 5, 10]
 
     private func t(_ key: String) -> String { locale.localized(key) }
@@ -26,11 +27,24 @@ struct MemoryDetailSection: View {
                 loadingCard
             }
         }
-        .onAppear { store.start(interval: TimeInterval(refreshInterval)) }
+        .onAppear {
+            migrateLegacyRefreshInterval()
+            store.start(interval: TimeInterval(refreshInterval))
+        }
         .onDisappear { store.stop() }
         .onChange(of: refreshInterval) { _, newValue in
             store.updateInterval(TimeInterval(newValue))
         }
+    }
+
+    /// Preserve the interval a user chose on the old Device Information page.
+    private func migrateLegacyRefreshInterval() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "memoryMonitorRefreshInterval") == nil,
+              let legacy = defaults.object(forKey: Self.legacyRefreshIntervalKey) as? Int
+        else { return }
+        refreshInterval = legacy
+        defaults.removeObject(forKey: Self.legacyRefreshIntervalKey)
     }
 
     private var refreshBar: some View {
@@ -58,7 +72,7 @@ struct MemoryDetailSection: View {
         }
     }
 
-    private func compositionCard(_ snapshot: MemoryDetailSnapshot) -> some View {
+    private func compositionCard(_ snapshot: MemoryMonitorSnapshot) -> some View {
         MemoryCard(title: t("Memory Composition"), icon: "chart.pie.fill", tint: .blue) {
             HStack(alignment: .center, spacing: 28) {
                 MemoryDonut(snapshot: snapshot, usedLabel: t("Used"))
@@ -127,7 +141,7 @@ struct MemoryDetailSection: View {
         }
     }
 
-    private func pressureSwapCard(_ snapshot: MemoryDetailSnapshot) -> some View {
+    private func pressureSwapCard(_ snapshot: MemoryMonitorSnapshot) -> some View {
         MemoryCard(title: t("Pressure & Swap"), icon: "gauge.with.dots.needle.67percent", tint: .orange) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
@@ -296,14 +310,14 @@ struct MemoryDetailSection: View {
         }
     }
 
-    private func swapDetail(_ snapshot: MemoryDetailSnapshot) -> String {
+    private func swapDetail(_ snapshot: MemoryMonitorSnapshot) -> String {
         guard let used = snapshot.swapUsedBytes, let total = snapshot.swapTotalBytes else {
             return "—"
         }
         return "\(MemoryFormat.bytes(used)) / \(MemoryFormat.bytes(total))"
     }
 
-    private func swapPercent(_ snapshot: MemoryDetailSnapshot) -> String {
+    private func swapPercent(_ snapshot: MemoryMonitorSnapshot) -> String {
         guard snapshot.swapTotalBytes != nil else { return "—" }
         return percent(snapshot.swapFraction)
     }
@@ -351,7 +365,7 @@ private struct MemoryCard<Content: View>: View {
 }
 
 private struct MemoryDonut: View {
-    let snapshot: MemoryDetailSnapshot
+    let snapshot: MemoryMonitorSnapshot
     let usedLabel: String
 
     var body: some View {

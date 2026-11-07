@@ -7,6 +7,7 @@ import SwiftUI
 enum WindowRouter {
     static var openSettings: (() -> Void)?
     static var openDeviceInfo: (() -> Void)?
+    static var openTools: (() -> Void)?
     static var openGuide: (() -> Void)?
     static var openAbout: (() -> Void)?
 
@@ -18,6 +19,10 @@ enum WindowRouter {
         openDeviceInfo = {
             openWindow(id: "device-info")
             WindowFronting.bringToFront(.deviceInfo)
+        }
+        openTools = {
+            openWindow(id: "tools")
+            WindowFronting.bringToFront(.tools)
         }
         openGuide = {
             openWindow(id: "guide")
@@ -58,6 +63,15 @@ struct SemonoApp: App {
             DeviceInfoView()
         }
         .defaultSize(width: 1080, height: 720)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.suppressed)
+
+        Window("Tools", id: "tools") {
+            ToolsView()
+        }
+        .defaultSize(width: 1120, height: 760)
         .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .restorationBehavior(.disabled)

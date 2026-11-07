@@ -4,6 +4,7 @@ import SwiftUI
 enum SemonoWindow {
     case settings
     case deviceInfo
+    case tools
     case guide
     case about
 }
@@ -15,11 +16,13 @@ enum SemonoWindow {
 enum WindowRegistry {
     static weak var settings: NSWindow?
     static weak var deviceInfo: NSWindow?
+    static weak var tools: NSWindow?
     static weak var guide: NSWindow?
     static weak var about: NSWindow?
 
     static var settingsWindow: NSWindow? { settings }
     static var deviceInfoWindow: NSWindow? { deviceInfo }
+    static var toolsWindow: NSWindow? { tools }
     static var guideWindow: NSWindow? { guide }
     static var aboutWindow: NSWindow? { about }
 }
@@ -42,6 +45,7 @@ struct WindowRegistration: NSViewRepresentable {
             switch window {
             case .settings: WindowRegistry.settings = view.window
             case .deviceInfo: WindowRegistry.deviceInfo = view.window
+            case .tools: WindowRegistry.tools = view.window
             case .guide: WindowRegistry.guide = view.window
             case .about: WindowRegistry.about = view.window
             }
@@ -76,6 +80,7 @@ enum WindowFronting {
         switch window {
         case .settings: registered = WindowRegistry.settingsWindow
         case .deviceInfo: registered = WindowRegistry.deviceInfoWindow
+        case .tools: registered = WindowRegistry.toolsWindow
         case .guide: registered = WindowRegistry.guideWindow
         case .about: registered = WindowRegistry.aboutWindow
         }
@@ -94,6 +99,8 @@ enum WindowFronting {
         switch window {
         case .settings: ["Semono Settings", "Semono 设置"]
         case .deviceInfo: ["Device Information", "设备信息"]
+        case .tools:
+            [LocaleManager.shared.localized("Tools"), "Tools", "工具"]
         case .guide:
             [LocaleManager.shared.localized("User Guide"), "User Guide", "使用说明"]
         case .about:

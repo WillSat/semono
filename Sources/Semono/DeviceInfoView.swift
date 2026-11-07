@@ -158,10 +158,6 @@ private struct DeviceDetailView: View {
             LazyVStack(alignment: .leading, spacing: 16) {
                 header
 
-                if category == .memory {
-                    MemoryDetailSection()
-                }
-
                 if let report {
                     if category == .hardware {
                         HardwareSummaryCard(report: report, chinese: chinese)
@@ -214,12 +210,6 @@ private struct DeviceDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
-                if category == .memory {
-                    Text(t("Includes live memory monitoring."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 1)
                 }
             }
 

@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// A compact, scrollable guide to the HUD's columns, the pressure states and
-/// the ways to move or hide the overlay.
+/// A compact, scrollable guide to the HUD's columns, pressure states, tools,
+/// and menu-bar actions.
 struct UserGuideView: View {
     @ObservedObject private var locale = LocaleManager.shared
 
@@ -14,6 +14,7 @@ struct UserGuideView: View {
                 readingCard
                 metricsCard
                 pressureCard
+                toolsCard
                 usingCard
             }
             .padding(26)
@@ -43,7 +44,7 @@ struct UserGuideView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(t("User Guide"))
                     .font(.system(size: 28, weight: .bold, design: .rounded))
-                Text(t("How to read the HUD and what each metric means."))
+                Text(t("How to read the HUD and use the tools."))
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
@@ -90,6 +91,48 @@ struct UserGuideView: View {
                 pressureChip("#N", t("Normal"), ColorScale.color(forPressureLevel: 0, light: true))
                 pressureChip("#W", t("Warning"), ColorScale.color(forPressureLevel: 1, light: true))
                 pressureChip("#C", t("Critical"), ColorScale.color(forPressureLevel: 2, light: true))
+            }
+        }
+    }
+
+    private var toolsCard: some View {
+        GuideCard(title: t("Tools"), icon: "wrench.and.screwdriver", tint: .indigo) {
+            GuideTool(
+                icon: "memorychip",
+                tint: .blue,
+                title: t("Memory Monitor"),
+                description: t("Live memory composition, pressure, swap and top applications.")
+            ) {
+                GuideBullet(
+                    icon: "arrow.clockwise",
+                    text: t("Refreshes only while open; set the interval in the tool.")
+                )
+                GuideBullet(
+                    icon: "chart.bar.fill",
+                    text: t("Top Applications uses physical footprint and lists regular apps.")
+                )
+            }
+
+            Divider().opacity(0.5)
+
+            GuideTool(
+                icon: "rectangle.roundedbottom",
+                tint: .purple,
+                title: t("Screen Corners"),
+                description: t("Round the bottom corners of the built-in display.")
+            ) {
+                GuideBullet(
+                    icon: "cursorarrow",
+                    text: t("Corners sit above all windows, fade on hover and pass clicks through.")
+                )
+                GuideBullet(
+                    icon: "slider.horizontal.3",
+                    text: t("Match App Windows uses the fixed macOS 27 reference; Advanced exposes radius and curvature.")
+                )
+                GuideBullet(
+                    icon: "camera",
+                    text: t("Show in Full Screen is off by default. Screenshots and recordings never include the corners.")
+                )
             }
         }
     }
@@ -191,6 +234,59 @@ private struct GuideText: View {
             .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct GuideTool<Content: View>: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    let description: String
+    private let content: Content
+
+    init(
+        icon: String,
+        tint: Color,
+        title: String,
+        description: String,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.icon = icon
+        self.tint = tint
+        self.title = title
+        self.description = description
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(tint.gradient, in: .rect(cornerRadius: 7))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.headline)
+                    Text(description)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            content
+                .padding(.leading, 38)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.06), in: .rect(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(tint.opacity(0.18))
+        }
     }
 }
 

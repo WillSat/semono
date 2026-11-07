@@ -2,9 +2,9 @@ import Foundation
 import Testing
 @testable import Semono
 
-struct MemoryDetailTests {
+struct MemoryMonitorTests {
     @Test func usedAndSwapFractions() {
-        let snapshot = MemoryDetailSnapshot(
+        let snapshot = MemoryMonitorSnapshot(
             totalBytes: 16_000_000_000,
             appBytes: 4_000_000_000,
             wiredBytes: 2_000_000_000,
@@ -26,7 +26,7 @@ struct MemoryDetailTests {
     }
 
     @Test func missingSwapIsUnavailable() {
-        let snapshot = MemoryDetailSnapshot(
+        let snapshot = MemoryMonitorSnapshot(
             totalBytes: 16_000_000_000,
             appBytes: 0,
             wiredBytes: 0,

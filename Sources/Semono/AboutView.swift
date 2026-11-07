@@ -43,13 +43,6 @@ struct AboutView: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 30)
             .padding(.bottom, 24)
-            .background(
-                LinearGradient(
-                    colors: [Color.accentColor.opacity(0.16), Color.clear],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
 
             Divider()
 

@@ -32,7 +32,7 @@ struct MemoryCategory: Identifiable, Sendable {
     var id: String { kind.rawValue }
 }
 
-struct MemoryDetailSnapshot: Sendable {
+struct MemoryMonitorSnapshot: Sendable {
     let totalBytes: UInt64
     let appBytes: UInt64
     let wiredBytes: UInt64
@@ -76,8 +76,8 @@ struct MemoryAppUsage: Identifiable {
     let percentOfTotal: Double
 }
 
-enum MemoryDetailSampler {
-    static func sample() -> MemoryDetailSnapshot? {
+enum MemoryMonitorSampler {
+    static func sample() -> MemoryMonitorSnapshot? {
         var info = vm_statistics64()
         var count = mach_msg_type_number_t(
             MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
@@ -106,7 +106,7 @@ enum MemoryDetailSampler {
         let pressure = readPressure()
         let processes = readProcesses()
 
-        return MemoryDetailSnapshot(
+        return MemoryMonitorSnapshot(
             totalBytes: total,
             appBytes: app,
             wiredBytes: wired,
@@ -208,8 +208,8 @@ enum MemoryDetailSampler {
 }
 
 @MainActor
-final class MemoryDetailStore: ObservableObject {
-    @Published private(set) var snapshot: MemoryDetailSnapshot?
+final class MemoryMonitorStore: ObservableObject {
+    @Published private(set) var snapshot: MemoryMonitorSnapshot?
     @Published private(set) var apps: [MemoryAppUsage] = []
     @Published private(set) var isRefreshing = false
 
@@ -251,7 +251,7 @@ final class MemoryDetailStore: ObservableObject {
         isRefreshing = true
         Task { @MainActor in
             let snapshot = await Task.detached(priority: .utility) {
-                MemoryDetailSampler.sample()
+                MemoryMonitorSampler.sample()
             }.value
             guard isRunning else {
                 isRefreshing = false
@@ -264,7 +264,7 @@ final class MemoryDetailStore: ObservableObject {
         }
     }
 
-    private func apply(_ snapshot: MemoryDetailSnapshot) {
+    private func apply(_ snapshot: MemoryMonitorSnapshot) {
         self.snapshot = snapshot
         let mapped = snapshot.processes.compactMap { process -> MemoryAppUsage? in
             guard let app = NSRunningApplication(processIdentifier: process.pid),
